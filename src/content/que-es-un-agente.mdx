@@ -1,0 +1,170 @@
+Un **agente de IA** es un sistema en el que un modelo de lenguaje (LLM) **decide dinámicamente qué acciones tomar** —qué herramientas usar, en qué orden y cuándo detenerse— para cumplir un objetivo. La definición más útil en la práctica es la de Anthropic: *los agentes son LLMs que usan herramientas en un loop, en función del feedback del entorno*.
+
+Esa frase esconde casi todo lo importante. Vamos a desarmarla pieza por pieza.
+
+## Las cuatro piezas de un agente
+
+<Cards cols={2}>
+  <Card title="Modelo (LLM)" tag="razona">
+    Interpreta el objetivo, planifica y decide la siguiente acción. No ejecuta nada: produce texto o **solicitudes estructuradas de herramientas**.
+  </Card>
+  <Card title="Herramientas" tag="actúa">
+    Funciones con nombre, descripción y esquema JSON: consultar una API, buscar documentos, ejecutar código. Son las "manos" del agente.
+  </Card>
+  <Card title="Contexto y memoria" tag="recuerda">
+    Instrucciones, historial, resultados de herramientas y memoria persistente. Lo que el modelo ve en cada turno.
+  </Card>
+  <Card title="Harness" tag="orquesta">
+    El código que implementa el loop: llama al modelo, valida y ejecuta herramientas, aplica límites y guardrails. Es lo que proveen los frameworks.
+  </Card>
+</Cards>
+
+OpenAI lo resume como **modelo + herramientas + instrucciones**; Google habla de **modelo, herramientas y capa de orquestación**. Distintas palabras, misma arquitectura.
+
+## El loop agéntico
+
+El corazón de cualquier agente es un loop sorprendentemente simple. Recorre el diagrama paso a paso (puedes rotarlo, hacer zoom y hacer clic en cada nodo):
+
+<Diagram id="agent-loop" />
+
+En pseudocódigo, el harness hace esto:
+
+```python title="loop_minimo.py"
+def run_agent(goal: str, tools: dict, max_turns: int = 10) -> str:
+    messages = [{"role": "user", "content": goal}]
+    for _ in range(max_turns):                       # límite duro de turnos
+        response = llm.call(system=INSTRUCTIONS, messages=messages,
+                            tools=[t.schema for t in tools.values()])
+        messages.append(response.as_message())
+        if not response.tool_calls:                  # el modelo terminó
+            return response.text
+        for call in response.tool_calls:             # el modelo pidió herramientas
+            tool = tools[call.name]
+            args = tool.validate(call.arguments)     # nunca confíes ciegamente
+            result = tool.run(**args)
+            messages.append(tool_result(call.id, result))
+    raise TurnLimitExceeded("El agente no terminó en el límite de turnos")
+```
+
+Todo lo demás —memoria, multiagente, RAG, MCP— son formas de **mejorar lo que entra al contexto** o **ampliar lo que el agente puede hacer**.
+
+<Callout type="tip" title="Construye el loop a mano una vez">
+Antes de adoptar un framework, implementa este loop directamente contra la API del modelo (por ejemplo, la **Converse API** de Bedrock con `toolConfig`). Es la recomendación explícita de Anthropic: entender qué hace el framework por debajo evita errores difíciles de depurar.
+</Callout>
+
+## Tool calling: cómo "usa" herramientas un modelo
+
+El modelo no ejecuta código. Lo que ocurre es un intercambio estructurado:
+
+<Steps>
+
+1. **Declaras** las herramientas: nombre, descripción en lenguaje natural y un JSON Schema de los argumentos.
+2. El modelo, si lo considera útil, responde con un bloque **`tool_use`**: nombre de la herramienta + argumentos JSON.
+3. **Tu código** valida los argumentos, ejecuta la función real y devuelve un **`tool_result`**.
+4. El modelo lee el resultado y decide: otra herramienta o la respuesta final.
+
+</Steps>
+
+En los frameworks esto se simplifica muchísimo. En Google ADK, por ejemplo, una función Python con docstring **es** una herramienta:
+
+<CodeTabs labels={["Google ADK", "AWS Strands", "Bedrock Converse (a mano)"]}>
+
+```python title="adk_agent.py"
+from google.adk.agents import Agent
+
+def get_order_status(order_id: str) -> dict:
+    """Devuelve el estado logístico de un pedido.
+
+    Args:
+        order_id: Identificador del pedido, p. ej. "4512".
+    """
+    return {"order_id": order_id, "status": "retrasado", "eta": "2026-11-04"}
+
+root_agent = Agent(
+    name="soporte_pedidos",
+    model="gemini-flash-latest",
+    instruction="Ayudas a resolver dudas sobre pedidos. Usa las herramientas; no inventes datos.",
+    tools=[get_order_status],   # la firma y el docstring generan el esquema
+)
+```
+
+```python title="strands_agent.py"
+from strands import Agent, tool
+
+@tool
+def get_order_status(order_id: str) -> dict:
+    """Devuelve el estado logístico de un pedido."""
+    return {"order_id": order_id, "status": "retrasado", "eta": "2026-11-04"}
+
+agent = Agent(
+    model="global.anthropic.claude-sonnet-5-5",   # perfil de inferencia de Bedrock
+    system_prompt="Ayudas a resolver dudas sobre pedidos. No inventes datos.",
+    tools=[get_order_status],
+)
+agent("¿En qué estado está el pedido 4512?")
+```
+
+```python title="converse_loop.py"
+import boto3
+
+bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
+tool_config = {"tools": [{"toolSpec": {
+    "name": "get_order_status",
+    "description": "Devuelve el estado logístico de un pedido.",
+    "inputSchema": {"json": {"type": "object",
+        "properties": {"order_id": {"type": "string"}}, "required": ["order_id"]}},
+}}]}
+
+messages = [{"role": "user", "content": [{"text": "¿Estado del pedido 4512?"}]}]
+resp = bedrock.converse(modelId="global.anthropic.claude-sonnet-5-5",
+                        messages=messages, toolConfig=tool_config)
+# Si resp["stopReason"] == "tool_use": ejecutar la herramienta, agregar un
+# bloque {"toolResult": ...} a messages y volver a llamar a converse().
+```
+
+</CodeTabs>
+
+<Callout type="info">
+Los Claude recientes en Bedrock se invocan **mediante un perfil de inferencia** (`global.`, `us.`, `eu.`…), no con el ID base del modelo. Lo vemos en detalle en [AWS Bedrock y AgentCore](/guia/aws-bedrock-agentcore).
+</Callout>
+
+## Workflow o agente: la decisión más importante
+
+No todo lo que usa un LLM debe ser un agente. Anthropic distingue entre:
+
+- **Workflows**: LLMs y herramientas orquestados por **rutas de código predefinidas**.
+- **Agentes**: el LLM **dirige su propio proceso** y el uso de herramientas.
+
+<Diagram id="workflow-vs-agent" height={620} />
+
+| | Workflow | Agente |
+|---|---|---|
+| Quién decide la ruta | Tu código | El modelo |
+| Predecibilidad | Alta | Media/baja |
+| Costo y latencia | Bajos, acotados | Más altos, variables (≈4× tokens vs. chat) |
+| Evaluación | Paso a paso, sencilla | Requiere evals de trayectoria y de resultado |
+| Ideal para | Procesos repetibles y bien definidos | Tareas abiertas, con muchas ramas o datos no estructurados |
+
+La guía de OpenAI sugiere construir un agente cuando hay **decisiones complejas**, **reglas difíciles de mantener** o **mucho dato no estructurado**. Si tu proceso cabe en un diagrama de flujo estable, probablemente quieres un workflow (que puede tener pasos LLM dentro).
+
+<KeyPoints>
+
+- Empieza por la solución más simple: **una llamada → workflow → agente único → multiagente**.
+- Un agente es un loop: modelo + herramientas + contexto + harness con **límites**.
+- La calidad depende sobre todo de **las herramientas** (nombres, descripciones, validación) y del **contexto**, no del framework.
+- Toda acción irreversible necesita un control: validación, política o aprobación humana.
+
+</KeyPoints>
+
+## Qué agrega un entorno empresarial
+
+Un prototipo puede ser solo el loop. En producción aparecen requisitos que dan forma al resto de esta guía:
+
+<Cards cols={3}>
+  <Card title="Conocimiento propio" href="/guia/rag">RAG sobre documentos y datos corporativos, con permisos y citas.</Card>
+  <Card title="Integración estándar" href="/guia/mcp">MCP para herramientas, A2A entre agentes, gateways para centralizar acceso.</Card>
+  <Card title="Gobierno y seguridad" href="/guia/seguridad-gobernanza">Identidad, mínimo privilegio, guardrails, auditoría, OWASP.</Card>
+  <Card title="Calidad medible" href="/guia/evaluacion-observabilidad">Evals offline/online y trazas de cada paso.</Card>
+  <Card title="Runtime gestionado" href="/guia/aws-bedrock-agentcore">Aislamiento por sesión, escalado y memoria gestionada.</Card>
+  <Card title="Patrones" href="/guia/patrones-de-diseno">Chaining, routing, paralelización, orquestador-workers…</Card>
+</Cards>

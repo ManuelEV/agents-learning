@@ -1,0 +1,115 @@
+import type { IsoSpec } from '../components/iso/types'
+
+export const googleAdkRuntime: IsoSpec = {
+  id: 'google-adk-runtime',
+  title: 'El runtime de ADK por dentro',
+  summary:
+    'En ADK el **Runner** orquesta cada invocación: carga la sesión, ejecuta el agente, y por cada **Event** que el agente emite (respuesta, llamada a herramienta, cambio de estado) hace *commit* en los servicios. El agente se pausa en cada `yield` y solo continúa cuando el Runner procesó el evento. Recorre los pasos con un pedido retrasado como ejemplo.',
+  height: 500,
+  zones: [{ id: 'svc', label: 'Servicios del Runner', from: [1.8, 2.0], to: [11.4, 4.7], tone: 'memory' }],
+  nodes: [
+    { id: 'user', label: 'Usuario / API', sub: 'adk web · api_server', at: [0, 0], shape: 'person', tone: 'user', icon: 'user', info: 'La petición llega desde la Dev UI (`adk web`), la CLI (`adk run`), el servidor REST (`adk api_server`) o tu propia app que llama a `runner.run_async(...)`.' },
+    { id: 'runner', label: 'Runner', sub: 'orquesta la invocación', at: [3.2, 0], shape: 'tall', tone: 'infra', icon: 'repeat', info: 'Recibe el mensaje, lo agrega al historial de la sesión, arranca el agente raíz y procesa cada `Event` que este emite: persiste `state_delta` y `artifact_delta` y reenvía el evento a la UI.' },
+    { id: 'session', label: 'SessionService', sub: 'eventos + state', at: [3.2, 3.3], shape: 'cylinder', tone: 'memory', icon: 'database', info: 'Guarda la conversación como una lista de eventos y un diccionario `state`. Implementaciones: `InMemorySessionService` (dev), `DatabaseSessionService` (SQL) y el servicio gestionado de Agent Platform Sessions.' },
+    { id: 'agent', label: 'LlmAgent', sub: 'root_agent', at: [6.6, 0], shape: 'tall', tone: 'agent', icon: 'bot', info: 'Arma el `LlmRequest` (instrucción, historial, esquemas de herramientas), llama al modelo y ejecuta las herramientas pedidas. Emite un `Event` por cada paso relevante y se pausa hasta que el Runner lo procesa.' },
+    { id: 'model', label: 'Modelo', sub: 'Gemini · LiteLlm→Bedrock', at: [6.6, -3.4], shape: 'sphere', tone: 'model', icon: 'brain', info: 'Gemini se usa con un string (`gemini-flash-latest`); otros proveedores, como Claude en Bedrock, a través del conector `LiteLlm` o de un proxy LiteLLM.' },
+    { id: 'memory', label: 'MemoryService', sub: 'largo plazo', at: [6.6, 3.3], shape: 'stack', tone: 'memory', icon: 'search', info: 'Memoria buscable entre sesiones (p. ej. Memory Bank de Agent Platform). Las sesiones terminadas se pueden ingestar y el agente las consulta con herramientas como `load_memory`.' },
+    { id: 'tool', label: 'FunctionTool', sub: 'get_order_status', at: [10, 0], shape: 'box', tone: 'tool', icon: 'wrench', info: 'Una función Python con type hints y docstring. Si declara un parámetro `tool_context: ToolContext`, puede leer y escribir `tool_context.state` y guardar artefactos.' },
+    { id: 'mcp', label: 'McpToolset', sub: 'servidor MCP', at: [10, -3.4], shape: 'hex', tone: 'protocol', icon: 'plug', info: 'Expone las herramientas de un servidor MCP (stdio o Streamable HTTP) como herramientas ADK, con `tool_filter` para limitar cuáles ve el modelo.' },
+    { id: 'artifacts', label: 'ArtifactService', sub: 'archivos versionados', at: [10, 3.3], shape: 'doc', tone: 'data', icon: 'file', info: 'Almacena blobs con nombre y versión (PDFs, imágenes, CSV) asociados a la sesión o al usuario. En GCP suele respaldarse en Cloud Storage.' },
+  ],
+  edges: [
+    { from: 'user', to: 'runner' },
+    { from: 'runner', to: 'session', route: 'z' },
+    { from: 'runner', to: 'agent', label: 'InvocationContext' },
+    { from: 'agent', to: 'model', label: 'LlmRequest' },
+    { from: 'agent', to: 'tool' },
+    { from: 'agent', to: 'mcp', route: 'z' },
+    { from: 'session', to: 'memory', dashed: true },
+    { from: 'tool', to: 'artifacts', route: 'z', dashed: true },
+  ],
+  steps: [
+    { title: '1 · Llega el mensaje', body: 'Tu app llama `runner.run_async(user_id, session_id, new_message)` con un `types.Content`. Ejemplo: *"¿Por qué no ha llegado mi pedido 4512?"*.', flows: ['user>runner'] },
+    { title: '2 · Cargar la sesión', body: 'El Runner obtiene la sesión del `SessionService` (historial + `state`) y agrega el mensaje del usuario como un nuevo evento.', flows: ['session>runner', 'runner>session'] },
+    { title: '3 · Arrancar el agente', body: 'Se crea un `InvocationContext` y se ejecuta el agente raíz. Antes, si existe, corre `before_agent_callback`.', flows: ['runner>agent'] },
+    { title: '4 · Razonar en el modelo', body: 'El agente arma el `LlmRequest` (instrucción con variables de `state`, historial, esquemas de herramientas). `before_model_callback` puede inspeccionarlo o bloquearlo. El modelo responde pidiendo `get_order_status`.', flows: ['agent>model', 'model>agent'] },
+    { title: '5 · Ejecutar herramientas', body: 'El agente ejecuta la `FunctionTool` (con `before/after_tool_callback`). Si la herramienta escribe en `tool_context.state`, el cambio viaja como `state_delta` en el evento de respuesta.', flows: ['agent>tool', 'tool>agent'] },
+    { title: '6 · Herramientas remotas por MCP', body: 'Para consultar el transportista, el agente llama una herramienta del `McpToolset`. Para el modelo es indistinguible de una función local.', flows: ['agent>mcp', 'mcp>agent'] },
+    { title: '7 · Yield y commit', body: 'Cada `Event` emitido vuelve al Runner, que llama `session_service.append_event(...)`: ahí se **persisten** el historial, el `state_delta` y los artefactos. Solo entonces el agente continúa.', flows: ['agent>runner', 'runner>session', 'tool>artifacts'] },
+    { title: '8 · Respuesta y memoria', body: 'El evento final (`event.is_final_response()`) llega al usuario. Opcionalmente, la sesión se ingesta al `MemoryService` para recordarla en conversaciones futuras.', flows: ['runner>user', 'session>memory'] },
+  ],
+}
+
+export const googleAdkMultiagente: IsoSpec = {
+  id: 'google-adk-multiagente',
+  title: 'Composición multiagente en ADK',
+  summary:
+    'ADK ofrece tres formas de componer agentes: **sub_agents** (el coordinador transfiere el control), **AgentTool** (el coordinador llama a otro agente como herramienta y conserva el control) y **workflows deterministas** (`SequentialAgent`, `ParallelAgent`, `LoopAgent` o, desde 2.0, el grafo `Workflow`). Además, un agente remoto se integra por A2A.',
+  height: 500,
+  zones: [{ id: 'wf', label: 'Workflow determinista', from: [5.0, 2.0], to: [15.0, 4.9], tone: 'infra' }],
+  nodes: [
+    { id: 'user', label: 'Cliente retail', at: [0, 0], shape: 'person', tone: 'user', icon: 'user', info: 'Un cliente escribe al canal de soporte de una tienda online.' },
+    { id: 'coord', label: 'Coordinador', sub: 'LlmAgent + sub_agents', at: [3.2, 0], shape: 'tall', tone: 'agent', icon: 'router', info: 'Agente raíz con `sub_agents=[...]`. El modelo decide si responde, si llama una herramienta o si **transfiere** la conversación a un especialista (`transfer_to_agent`), guiándose por la `description` de cada uno.' },
+    { id: 'billing', label: 'Facturación', sub: 'sub_agent (transfer)', at: [6.6, -3.4], shape: 'tall', tone: 'agent', icon: 'card', scale: 0.85, info: 'Especialista que **toma el control** de la conversación tras la transferencia: responde directamente al usuario hasta resolver o devolver el control.' },
+    { id: 'finance', label: 'Agente Finanzas', sub: 'RemoteA2aAgent', at: [10, -3.4], shape: 'tall', tone: 'protocol', icon: 'network', scale: 0.85, info: 'Agente de otro equipo expuesto por A2A. En ADK se consume con `RemoteA2aAgent(agent_card=...)` y se usa como un sub-agente más. Integración marcada como experimental en Python.' },
+    { id: 'policy', label: 'Buscador políticas', sub: 'AgentTool', at: [6.6, 0], shape: 'box', tone: 'tool', icon: 'book', info: 'Un agente envuelto con `AgentTool(agent=...)`. El coordinador lo llama como una función, recibe el resultado y **sigue a cargo** de la respuesta. Útil para búsqueda o herramientas integradas que no se combinan con otras.' },
+    { id: 'pipe', label: 'Devoluciones', sub: 'SequentialAgent', at: [6.6, 3.4], shape: 'box', tone: 'infra', icon: 'workflow', info: 'Pipeline de pasos fijos: validar → decidir → redactar. Cada sub-agente escribe su resultado en `state` con `output_key` y el siguiente lo lee con `{variable}` en su instrucción.' },
+    { id: 'par', label: 'Validaciones', sub: 'ParallelAgent', at: [10, 3.4], shape: 'box', tone: 'infra', icon: 'split', info: 'Ejecuta en paralelo la verificación de stock y el score de fraude. Cada rama escribe en una clave distinta de `state`.' },
+    { id: 'loop', label: 'Redactar y revisar', sub: 'LoopAgent', at: [13.4, 3.4], shape: 'box', tone: 'infra', icon: 'repeat', info: 'Loop *evaluator-optimizer*: un agente redacta la respuesta y otro la revisa, hasta aprobar o llegar a `max_iterations`. En ADK 2.0 (Python/Go) este patrón se expresa mejor como grafo `Workflow`.' },
+  ],
+  edges: [
+    { from: 'user', to: 'coord' },
+    { from: 'coord', to: 'billing', label: 'transfer', route: 'z' },
+    { from: 'billing', to: 'finance', label: 'A2A' },
+    { from: 'coord', to: 'policy', label: 'tool call' },
+    { from: 'coord', to: 'pipe', route: 'z' },
+    { from: 'pipe', to: 'par' },
+    { from: 'par', to: 'loop' },
+  ],
+  steps: [
+    { title: '1 · El coordinador recibe', body: 'El cliente pregunta: *"Me cobraron dos veces y además quiero devolver una zapatilla"*. El coordinador (un `LlmAgent`) analiza la intención.', flows: ['user>coord'] },
+    { title: '2 · AgentTool: consultar sin ceder control', body: 'Primero llama al **buscador de políticas** como herramienta para saber el plazo de devolución. El resultado vuelve al coordinador, que sigue respondiendo.', flows: ['coord>policy', 'policy>coord'] },
+    { title: '3 · Transferencia a un sub-agente', body: 'Para el doble cobro, el modelo emite `transfer_to_agent("Facturacion")`. Desde aquí, **Facturación** conversa directamente con el cliente.', flows: ['coord>billing'] },
+    { title: '4 · Delegación remota por A2A', body: 'Facturación necesita aprobar un reverso de cargo: lo delega al **agente de Finanzas** de otro equipo vía A2A, sin compartir código ni memoria.', flows: ['billing>finance', 'finance>billing'] },
+    { title: '5 · Workflow determinista', body: 'La devolución sigue reglas fijas, así que el coordinador transfiere a un `SequentialAgent`: aquí **no decide el LLM** el orden de los pasos.', flows: ['coord>pipe'] },
+    { title: '6 · Paralelo y loop', body: 'Stock y fraude se validan en paralelo; luego un loop redacta y revisa la respuesta. Los resultados viajan por `state` (`output_key`).', flows: ['pipe>par', 'par>loop'] },
+    { title: '7 · En ADK 2.0', body: 'En Python y Go, los workflow agents quedan *superseded* por el grafo `Workflow` (nodos agente + funciones + rutas). Siguen funcionando, pero el código nuevo debería usar grafos.', focus: ['pipe', 'par', 'loop'] },
+  ],
+}
+
+export const googleAdkCallbacks: IsoSpec = {
+  id: 'google-adk-callbacks',
+  title: 'Pipeline de callbacks',
+  summary:
+    'Los **callbacks** son funciones que ADK ejecuta antes y después del agente, del modelo y de cada herramienta. Si un `before_*` devuelve un objeto, **salta** ese paso y usa el objeto; si devuelve `None`, el flujo sigue. Los `after_*` pueden reemplazar el resultado. Son el lugar natural para guardrails, caché, auditoría y políticas.',
+  height: 470,
+  nodes: [
+    { id: 'ba', label: 'before_agent', sub: 'gate de entrada', at: [0, 0], shape: 'diamond', tone: 'guard', icon: 'filter', info: 'Corre antes de la lógica del agente. Devolver un `types.Content` omite la ejecución del agente (p. ej. fuera de horario o usuario sin permiso).' },
+    { id: 'agent', label: 'LlmAgent', sub: 'tu agente', at: [3.2, 0], shape: 'tall', tone: 'agent', icon: 'bot', info: 'Los callbacks se registran como parámetros del agente: `before_model_callback=...`, `before_tool_callback=...`, etc.' },
+    { id: 'aa', label: 'after_agent', sub: 'post-proceso', at: [0, 3.3], shape: 'diamond', tone: 'guard', icon: 'check', info: 'Corre al final. En Python, devolver contenido **agrega** un evento adicional (no reemplaza la salida), así que úsalo con cuidado.' },
+    { id: 'bm', label: 'before_model', sub: 'LlmRequest', at: [6.4, -3.3], shape: 'diamond', tone: 'guard', icon: 'shield', info: 'Recibe `callback_context` y `llm_request`. Ideal para filtrar PII, inyectar contexto o servir desde caché devolviendo un `LlmResponse` sin llamar al modelo.' },
+    { id: 'model', label: 'Modelo', at: [9.6, -3.3], shape: 'sphere', tone: 'model', icon: 'brain', info: 'La llamada real al LLM (Gemini o Claude vía LiteLlm). Solo ocurre si `before_model` devolvió `None`.' },
+    { id: 'am', label: 'after_model', sub: 'LlmResponse', at: [12.8, -3.3], shape: 'diamond', tone: 'guard', icon: 'eye', info: 'Puede inspeccionar o reescribir la respuesta del modelo: enmascarar datos, registrar tokens, normalizar formato.' },
+    { id: 'bt', label: 'before_tool', sub: 'tool + args', at: [6.4, 3.3], shape: 'diamond', tone: 'guard', icon: 'lock', info: 'Recibe la herramienta, los argumentos y el `ToolContext`. Devolver un `dict` **bloquea** la ejecución y usa ese dict como resultado: perfecto para políticas (montos máximos, allowlists).' },
+    { id: 'tool', label: 'Herramienta', sub: 'refund_order', at: [9.6, 3.3], shape: 'box', tone: 'tool', icon: 'wrench', info: 'La herramienta real (función, MCP, AgentTool). Solo corre si `before_tool` devolvió `None`.' },
+    { id: 'at', label: 'after_tool', sub: 'resultado', at: [12.8, 3.3], shape: 'diamond', tone: 'guard', icon: 'scroll', info: 'Puede transformar el resultado antes de que vuelva al modelo: recortar payloads grandes, redactar campos sensibles, auditar.' },
+  ],
+  edges: [
+    { from: 'ba', to: 'agent' },
+    { from: 'agent', to: 'bm', route: 'z' },
+    { from: 'bm', to: 'model' },
+    { from: 'model', to: 'am' },
+    { from: 'agent', to: 'bt', route: 'z' },
+    { from: 'bt', to: 'tool' },
+    { from: 'tool', to: 'at' },
+    { from: 'agent', to: 'aa', route: 'z' },
+  ],
+  steps: [
+    { title: '1 · Gate del agente', body: '`before_agent_callback` decide si el agente corre. Ejemplo: si `state["tienda_cerrada"]` es verdadero, devuelve un mensaje fijo y no gasta tokens.', flows: ['ba>agent'] },
+    { title: '2 · Antes del modelo', body: '`before_model_callback` revisa el `LlmRequest`: enmascara números de tarjeta o responde desde caché. Si devuelve `None`, se llama al modelo.', flows: ['agent>bm', 'bm>model'] },
+    { title: '3 · Después del modelo', body: '`after_model_callback` puede reescribir el `LlmResponse` (p. ej. quitar datos internos) antes de que el agente lo procese.', flows: ['model>am'] },
+    { title: '4 · Política sobre herramientas', body: 'El modelo pidió `refund_order(monto=900)`. `before_tool_callback` aplica la regla de negocio: más de 500 USD requiere aprobación, así que devuelve un `dict` de error y la herramienta **no se ejecuta**.', flows: ['agent>bt'], focus: ['bt'] },
+    { title: '5 · Ejecución y post-proceso', body: 'Para montos permitidos, la herramienta corre y `after_tool_callback` recorta y audita el resultado antes de devolverlo al modelo.', flows: ['bt>tool', 'tool>at'] },
+    { title: '6 · Cierre', body: '`after_agent_callback` corre al final de la invocación: buen lugar para métricas de negocio. Recuerda: en Python, devolver contenido aquí agrega un evento extra.', flows: ['agent>aa'] },
+  ],
+}

@@ -1,0 +1,261 @@
+**LangGraph** es el runtime de orquestación de bajo nivel del ecosistema LangChain: modela un agente o un workflow como un **grafo de estado**, donde los nodos son funciones, las aristas definen el flujo y un **checkpointer** persiste el estado tras cada paso. Ese diseño le da tres capacidades que muchos frameworks agregan después: **ejecución durable**, **human-in-the-loop** de primera clase y **control explícito** de cada decisión. Es el framework de referencia cuando el flujo importa tanto como el modelo.
+
+## Estado del proyecto (octubre de 2026)
+
+| Paquete | Versión | Rol |
+|---|---|---|
+| `langgraph` | **1.2.19** (30-10-2026) | Runtime de grafos: estado, nodos, aristas, checkpoints, interrupts, streaming |
+| `langchain` | **1.4.7** | API de alto nivel: `create_agent`, middleware, integraciones de modelos y herramientas |
+| `langchain-aws` | 1.x | Integración con Amazon Bedrock (`ChatBedrockConverse`) |
+| LangGraph JS | `@langchain/langgraph` | Port en TypeScript con los mismos conceptos |
+
+Ojo con los nombres de producto: en octubre de 2025 **LangGraph Platform pasó a llamarse LangSmith Deployment** y **LangGraph Studio pasó a ser LangSmith Studio**. La librería open source sigue llamándose LangGraph; lo que cambió es la marca del servicio gestionado de despliegue y del IDE visual.
+
+<Callout type="info" title="LangChain 1.x vs. LangGraph">
+Desde LangChain 1.0, la forma recomendada de crear un agente "estándar" es `create_agent` de LangChain, que corre **sobre** el runtime de LangGraph. Usa `create_agent` cuando el loop clásico modelo↔herramientas te alcance, y baja a `StateGraph` cuando necesites control fino del flujo. No son excluyentes: un agente de `create_agent` puede ser un nodo de tu grafo.
+</Callout>
+
+## Conceptos clave
+
+<Cards cols={3}>
+  <Card title="State" tag="datos">
+    Un `TypedDict` (o Pydantic) compartido por todos los nodos. Cada clave puede tener un **reducer** que define cómo se combinan las actualizaciones.
+  </Card>
+  <Card title="Nodes" tag="trabajo">
+    Funciones que reciben el estado y devuelven una actualización parcial. Pueden llamar a un LLM, a herramientas o ser código puro.
+  </Card>
+  <Card title="Edges" tag="flujo">
+    Aristas fijas (`add_edge`) o **condicionales** (`add_conditional_edges`), donde una función decide el siguiente nodo.
+  </Card>
+  <Card title="Checkpointer" tag="durabilidad">
+    Guarda un snapshot del estado por **thread** tras cada paso. Base de la memoria, el HITL y la recuperación ante fallos.
+  </Card>
+  <Card title="Interrupts" tag="HITL">
+    `interrupt()` pausa el grafo en cualquier nodo y espera un `Command(resume=...)`, aunque pasen días.
+  </Card>
+  <Card title="Store" tag="memoria">
+    Memoria de largo plazo **entre threads**, organizada por namespaces (por usuario, por tenant).
+  </Card>
+</Cards>
+
+### Estado y reducers
+
+Cada nodo devuelve solo las claves que cambia. Por defecto, el valor nuevo **reemplaza** al anterior; con un reducer puedes acumular. El caso más común son los mensajes: `MessagesState` ya trae una clave `messages` con el reducer `add_messages`, que agrega mensajes nuevos (y actualiza por ID) en vez de sobrescribir la lista.
+
+```python title="state.py"
+from typing import Annotated, TypedDict
+import operator
+from langgraph.graph import MessagesState
+
+class SupportState(MessagesState):                    # hereda messages + reducer add_messages
+    intent: str                                       # reemplazo simple
+    order_id: str | None
+    audit_log: Annotated[list[str], operator.add]     # reducer: concatena listas de cada nodo
+```
+
+## Un grafo de soporte con routing, checkpoints e interrupt
+
+El siguiente diagrama muestra el ciclo completo: clasificación, routing condicional, pausa para aprobación humana y reanudación desde el checkpoint.
+
+<Diagram id="langgraph-grafo" />
+
+Así se escribe ese grafo usando Claude en Bedrock a través de `langchain-aws`:
+
+```python title="support_graph.py"
+from typing import Literal
+from langchain_aws import ChatBedrockConverse
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import interrupt, Command
+from state import SupportState
+
+llm = ChatBedrockConverse(model_id="global.anthropic.claude-sonnet-5-5", region_name="us-east-1")
+
+def clasificar(state: SupportState) -> dict:
+    """Nodo LLM: clasifica la intención del último mensaje."""
+    out = llm.invoke([("system", "Responde solo REEMBOLSO o FAQ."), *state["messages"]])
+    return {"intent": out.content.strip().upper(), "audit_log": [f"intent={out.content}"]}
+
+def route_intent(state: SupportState) -> Literal["preparar_reembolso", "responder_faq"]:
+    """Arista condicional: la decisión es código, no el LLM."""
+    return "preparar_reembolso" if state["intent"] == "REEMBOLSO" else "responder_faq"
+
+def preparar_reembolso(state: SupportState) -> dict:
+    return {"audit_log": ["reembolso preparado: 89.990 CLP"]}
+
+def aprobacion(state: SupportState) -> dict:
+    ok = interrupt({"accion": "reembolso", "monto": 89990})   # pausa y persiste el estado
+    return {"audit_log": [f"aprobado={ok}"]}                   # al reanudar, ok = valor de Command(resume)
+
+def responder_faq(state: SupportState) -> dict:
+    return {"messages": [llm.invoke(state["messages"])]}
+
+builder = StateGraph(SupportState)
+for name, fn in [("clasificar", clasificar), ("preparar_reembolso", preparar_reembolso),
+                 ("aprobacion", aprobacion), ("responder_faq", responder_faq)]:
+    builder.add_node(name, fn)
+builder.add_edge(START, "clasificar")
+builder.add_conditional_edges("clasificar", route_intent)
+builder.add_edge("preparar_reembolso", "aprobacion")
+builder.add_edge("aprobacion", END)
+builder.add_edge("responder_faq", END)
+graph = builder.compile(checkpointer=InMemorySaver())        # en producción: Postgres/Redis
+```
+
+Y así se usa, con pausa y reanudación:
+
+```python title="run.py"
+config = {"configurable": {"thread_id": "ticket-4512"}}       # identifica la conversación
+result = graph.invoke({"messages": [("user", "Quiero el reembolso del pedido 4512")]}, config)
+print(result["__interrupt__"])                                  # payload para el supervisor
+
+# ... minutos o días después, desde otro proceso, con el mismo thread_id:
+final = graph.invoke(Command(resume=True), config)
+print(final["audit_log"])
+```
+
+El nombre del parámetro de modelo en `ChatBedrockConverse` aparece como `model_id` y como `model` en distintos ejemplos de la documentación oficial; ambos se usan en la práctica, pero confirma el de tu versión de `langchain-aws`. Lo importante es usar el **perfil de inferencia** (`global.`, `us.`, `eu.`) y no el ID base del modelo.
+
+## Checkpointers, threads y ejecución durable
+
+El checkpointer guarda un snapshot del estado al final de cada *super-step* (un conjunto de nodos que corren en paralelo). Todo checkpoint pertenece a un **thread**, identificado por `thread_id`. Esto habilita:
+
+- **Memoria de conversación**: invocar de nuevo con el mismo `thread_id` continúa donde quedó.
+- **Human-in-the-loop**: un interrupt persiste el estado y libera recursos; la reanudación puede ocurrir en otro proceso o servidor.
+- **Tolerancia a fallos**: si un nodo falla, se reanuda desde el último checkpoint exitoso sin repetir lo ya hecho.
+- **Time travel**: puedes leer el historial de checkpoints (`get_state_history`) y re-ejecutar desde un punto anterior, útil para depurar.
+
+| Checkpointer | Paquete | Uso |
+|---|---|---|
+| `InMemorySaver` | `langgraph` | Desarrollo y tests |
+| SQLite | `langgraph-checkpoint-sqlite` | Prototipos de un solo proceso |
+| Postgres | `langgraph-checkpoint-postgres` | Producción (Aurora/RDS, Cloud SQL, AlloyDB) |
+| Gestionado | LangSmith Deployment | Persistencia incluida en la plataforma |
+
+La **ejecución durable** va un paso más allá: el grafo puede sobrevivir reinicios y reanudarse a mitad de una tarea larga. LangGraph ofrece modos de durabilidad (`"exit"`, `"async"`, `"sync"`) que equilibran rendimiento y seguridad de escritura del checkpoint; los efectos laterales no idempotentes (cobros, emails) deberían envolverse en *tasks* para no repetirse al reanudar. No pudimos verificar en esta revisión la página exacta de modos de durabilidad, así que confirma nombres y valores por defecto en la documentación de *durable execution*.
+
+<Callout type="warning" title="Interrupts: el nodo se re-ejecuta">
+Al reanudar, el nodo que llamó a `interrupt()` **vuelve a ejecutarse desde el principio**, y `interrupt()` devuelve el valor del `Command(resume=...)`. Todo lo que el nodo hace antes del interrupt se repite. Coloca los efectos laterales **después** del interrupt o en un nodo separado, y nunca envuelvas `interrupt()` en un `try/except` genérico.
+</Callout>
+
+## Multiagente: subgrafos y supervisor
+
+Un grafo compilado se puede usar como **nodo** de otro grafo (subgrafo). Cada subgrafo tiene su propio estado y lógica, y puede compartir claves con el padre o transformarlas en la frontera. Si el padre tiene checkpointer, se propaga a los subgrafos, así que un interrupt dentro de un subgrafo funciona igual.
+
+Sobre esa base se construye el patrón **supervisor**: un agente central decide qué especialista invocar y consolida los resultados.
+
+<Diagram id="langgraph-supervisor" />
+
+Con LangChain 1.x, la forma más directa de implementar un supervisor es exponer a los especialistas **como herramientas** de un agente creado con `create_agent`:
+
+```python title="supervisor.py"
+from langchain.agents import create_agent
+from langchain.tools import tool
+from langchain_aws import ChatBedrockConverse
+
+model = ChatBedrockConverse(model_id="global.anthropic.claude-sonnet-5-5", region_name="us-east-1")
+
+disputes_agent = create_agent(model=model, tools=[], system_prompt="Abres disputas de cargos y entregas el folio.")
+cards_agent = create_agent(model=model, tools=[], system_prompt="Gestionas bloqueo y reposición de tarjetas.")
+
+@tool
+def disputas(solicitud: str) -> str:
+    """Abre una disputa por un cargo no reconocido. Incluye fecha, monto y comercio."""
+    r = disputes_agent.invoke({"messages": [("user", solicitud)]})
+    return r["messages"][-1].content
+
+@tool
+def tarjetas(solicitud: str) -> str:
+    """Bloquea o repone tarjetas. Requiere los últimos 4 dígitos."""
+    r = cards_agent.invoke({"messages": [("user", solicitud)]})
+    return r["messages"][-1].content
+
+supervisor = create_agent(
+    model=model,
+    tools=[disputas, tarjetas],
+    system_prompt="Eres el asistente del banco. Delega a los especialistas y responde con un resumen claro.",
+)
+```
+
+También existe la librería `langgraph-supervisor` con un constructor dedicado, y el patrón alternativo de **handoffs** (un agente transfiere el control a otro devolviendo un `Command(goto=...)`), equivalente a la transferencia de `sub_agents` en [ADK](/guia/google-adk) o al Swarm de [Strands](/guia/strands-agents). Elige "agentes como herramientas" cuando quieras que el supervisor conserve el control y handoffs cuando el especialista deba conversar directamente con el usuario.
+
+## Streaming
+
+Los agentes son lentos; mostrar progreso es parte de la experiencia. LangGraph expone varios modos de streaming con `graph.stream(...)` / `astream(...)`:
+
+| `stream_mode` | Qué emite | Uso típico |
+|---|---|---|
+| `"values"` | El estado completo tras cada paso | Depuración |
+| `"updates"` | Solo las actualizaciones de cada nodo | Mostrar "clasificando… preparando reembolso…" |
+| `"messages"` | Tokens del LLM a medida que se generan | Chat con escritura progresiva |
+| `"custom"` | Datos arbitrarios emitidos desde nodos | Barras de progreso, eventos de negocio |
+
+Se pueden combinar varios modos en una sola llamada y, con `subgraphs=True`, recibir también los eventos de los subgrafos.
+
+## LangChain 1.x: create_agent y middleware
+
+Para el agente "clásico" (loop modelo↔herramientas), `create_agent` evita escribir el grafo. Su punto fuerte es el **middleware**: ganchos que se ejecutan antes y después de cada llamada al modelo o a una herramienta, donde se resuelven necesidades transversales sin reescribir el agente.
+
+```python title="agent_middleware.py"
+from langchain.agents import create_agent
+from langchain.agents.middleware import HumanInTheLoopMiddleware, SummarizationMiddleware
+from langgraph.checkpoint.memory import InMemorySaver
+
+agent = create_agent(
+    model=model,                                   # ChatBedrockConverse del ejemplo anterior
+    tools=[get_order_status, issue_refund],
+    system_prompt="Eres el agente de postventa de una tienda online.",
+    middleware=[
+        SummarizationMiddleware(model=model),                          # resume historial largo (parámetros: ver docs)
+        HumanInTheLoopMiddleware(interrupt_on={"issue_refund": True}), # aprobación antes de reembolsar
+    ],
+    checkpointer=InMemorySaver(),                  # HITL necesita checkpointer
+)
+```
+
+Hay middleware integrado para resumen de contexto, aprobación humana, detección de PII y límites de llamadas, entre otros; los nombres exactos más allá de `SummarizationMiddleware` y `HumanInTheLoopMiddleware` conviene revisarlos en la página de middleware integrado. Los parámetros de `SummarizationMiddleware` mostrados son ilustrativos.
+
+## Despliegue y observabilidad
+
+LangGraph corre en cualquier lugar donde corra Python o Node: un contenedor en ECS, Cloud Run o Kubernetes con Postgres como checkpointer. Las opciones gestionadas:
+
+- **LangSmith Deployment** (ex LangGraph Platform): servidor de agentes con persistencia, colas de tareas, cron, double-texting y API de threads. Opciones cloud, híbrida y self-hosted.
+- **LangSmith Studio** (ex LangGraph Studio): IDE visual para ver el grafo, inspeccionar estado y probar interrupts.
+- **Runtimes agnósticos**: AgentCore Runtime en AWS, Agent Runtime en Google Cloud y hosted agents en Microsoft Foundry aceptan agentes LangGraph.
+- **Observabilidad**: LangSmith (nativo) o cualquier backend OpenTelemetry/Langfuse.
+
+## Cuándo elegir LangGraph
+
+| Necesitas… | LangGraph | Alternativa |
+|---|---|---|
+| Control explícito del flujo y routing en código | Excelente | Grafos `Workflow` de [ADK 2.0](/guia/google-adk) |
+| HITL con pausas largas y reanudación en otro proceso | Excelente (interrupt + checkpointer) | Microsoft Agent Framework workflows |
+| Durabilidad y tolerancia a fallos | Muy buena | Temporal + OpenAI Agents SDK o Pydantic AI |
+| Un agente simple que llama herramientas | Usa `create_agent` | [Strands](/guia/strands-agents), ADK |
+| Despliegue nativo en AWS con mínimo código | Bien vía AgentCore | Strands |
+
+<Callout type="tip" title="Errores comunes">
+- **Olvidar el `thread_id`**: sin él no hay memoria ni reanudación; con uno compartido entre usuarios, mezclas conversaciones.
+- **Estado gigante**: guardar documentos completos en el estado infla cada checkpoint. Guarda referencias (IDs, URIs de S3).
+- **Reducers implícitos**: sin reducer, dos nodos paralelos que escriben la misma clave generan conflicto. Declara reducers.
+- **Abusar del grafo**: si tu grafo es solo "modelo → herramientas → modelo", `create_agent` es suficiente.
+</Callout>
+
+<KeyPoints>
+
+- LangGraph modela agentes como **grafos de estado**: nodos que devuelven actualizaciones, reducers que las combinan y aristas (fijas o condicionales) que deciden el flujo.
+- El **checkpointer + `thread_id`** da memoria, HITL, time travel y tolerancia a fallos.
+- `interrupt()` + `Command(resume=...)` es el mecanismo de aprobación humana; el nodo se re-ejecuta al reanudar.
+- Subgrafos y el patrón **supervisor** (agentes como herramientas) cubren el multiagente.
+- LangChain 1.x `create_agent` + **middleware** para agentes estándar; LangSmith Deployment/Studio son los nuevos nombres de la plataforma.
+- Con Bedrock: `ChatBedrockConverse` de `langchain-aws` y perfiles de inferencia.
+
+</KeyPoints>
+
+## Siguientes pasos
+
+<Cards cols={3}>
+  <Card title="Orquestación avanzada" href="/guia/orquestacion-avanzada">Ejecución durable, colas, reintentos y workflows largos.</Card>
+  <Card title="Otros frameworks" href="/guia/otros-frameworks">OpenAI Agents SDK, Microsoft Agent Framework, Pydantic AI y más.</Card>
+  <Card title="Comparativa" href="/guia/comparativa-frameworks">LangGraph frente a ADK, Strands y el resto, con guía de decisión.</Card>
+</Cards>

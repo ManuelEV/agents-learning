@@ -1,0 +1,80 @@
+import type { IsoSpec } from '../components/iso/types'
+
+export const gcpArquitecturaAdk: IsoSpec = {
+  id: 'gcp-arquitectura-adk',
+  title: 'Arquitectura de referencia: agente ADK en Agent Platform',
+  summary:
+    'Un agente **ADK** desplegado en **Agent Runtime**, con **Sessions** y **Memory Bank** gestionados, modelos de **Model Garden** (Gemini o Claude), herramientas detrás de **Agent Gateway** y conocimiento en **Agent Search / RAG Engine**. Los empleados lo usan desde **Gemini Enterprise**.',
+  height: 500,
+  zones: [{ id: 'platform', label: 'Gemini Enterprise Agent Platform', from: [4.8, -4.9], to: [11.2, 4.9], tone: 'agent' }],
+  nodes: [
+    { id: 'user', label: 'Empleado', sub: 'web, Workspace, Teams', at: [-1.4, 0], shape: 'person', tone: 'user', icon: 'user', info: 'Un analista de operaciones pregunta por el estado del inventario y pide abrir una orden de reposición.' },
+    { id: 'ge', label: 'Gemini Enterprise', sub: 'ex Agentspace', at: [2.2, 0], shape: 'box', tone: 'user', icon: 'sparkles', info: 'Producto para empleados (chat, búsqueda y agentes). Los agentes ADK publicados en Agent Runtime pueden registrarse para aparecer aquí, con el SSO corporativo.' },
+    { id: 'obs', label: 'Observabilidad', sub: 'Cloud Trace · evals', at: [2.2, 3.4], shape: 'box', tone: 'infra', icon: 'chart', info: 'Trazas por defecto para agentes ADK (Agent Observability GA jun 2026), logging de prompts/respuestas y evaluación online del pilar *Optimize*.' },
+    { id: 'runtime', label: 'Agent Runtime', sub: 'ADK · ex Agent Engine', at: [6.4, 0], shape: 'tall', tone: 'agent', icon: 'bot', info: 'Runtime gestionado con autoescalado, *cold starts* rápidos y agentes de larga duración. Integración completa con ADK; también LangChain, LangGraph, AG2, LlamaIndex, CrewAI o cualquier contenedor.' },
+    { id: 'model', label: 'Model Garden', sub: 'Gemini · Claude', at: [6.4, -3.4], shape: 'sphere', tone: 'model', icon: 'brain', info: 'Gemini de forma nativa y modelos de terceros como **Claude** (Sonnet 5.5, Opus 5.5, Haiku 5.5) como servicio gestionado, facturados en tu proyecto GCP.' },
+    { id: 'sessions', label: 'Sessions', sub: 'estado de la sesión', at: [6.4, 3.4], shape: 'cylinder', tone: 'memory', icon: 'database', info: 'Agent Platform Sessions guarda eventos y estado de cada conversación (`VertexAiSessionService` en ADK). Endpoints multirregionales y globales GA desde jun 2026.' },
+    { id: 'memory', label: 'Memory Bank', sub: 'largo plazo', at: [9.6, 3.4], shape: 'cylinder', tone: 'memory', icon: 'brain', info: 'Memoria persistente entre sesiones: extrae y consolida hechos del usuario ("gestiona la bodega de Santiago"). Perfiles de memoria GA jul 2026.' },
+    { id: 'gw', label: 'Agent Gateway', sub: 'egress gobernado', at: [9.6, 0], shape: 'hex', tone: 'gateway', icon: 'shield', info: 'Punto central de aplicación de políticas para las llamadas del agente a herramientas, MCP y otros agentes. GA el 18-06-2026, con Model Armor GA el 24-06-2026.' },
+    { id: 'mcp', label: 'MCP de inventario', sub: 'Cloud Run', at: [13, -1.7], shape: 'box', tone: 'tool', icon: 'server', info: 'Servidor MCP propio en Cloud Run que envuelve el ERP: `get_stock`, `create_replenishment_order`.' },
+    { id: 'search', label: 'Agent Search', sub: 'o RAG Engine', at: [13, 1.7], shape: 'stack', tone: 'data', icon: 'search', info: 'Búsqueda empresarial gestionada (ex Vertex AI Search) o RAG Engine con el vector store que elijas, para manuales y procedimientos.' },
+  ],
+  edges: [
+    { from: 'user', to: 'ge' },
+    { from: 'ge', to: 'runtime' },
+    { from: 'runtime', to: 'model' },
+    { from: 'runtime', to: 'sessions' },
+    { from: 'runtime', to: 'memory', route: 'z' },
+    { from: 'runtime', to: 'gw' },
+    { from: 'gw', to: 'mcp', route: 'z' },
+    { from: 'gw', to: 'search', route: 'z' },
+    { from: 'runtime', to: 'obs', route: 'z', dashed: true },
+  ],
+  steps: [
+    { title: '1 · Entrada por Gemini Enterprise', body: 'El empleado abre el agente "Operaciones" en Gemini Enterprise. La identidad corporativa viaja con la petición hacia Agent Runtime.', flows: ['user>ge', 'ge>runtime'] },
+    { title: '2 · Sesión y memoria', body: 'ADK carga la sesión desde **Sessions** y recupera recuerdos relevantes de **Memory Bank** (bodega asignada, umbrales habituales de reposición).', flows: ['sessions>runtime', 'memory>runtime'] },
+    { title: '3 · Razonamiento', body: 'El agente llama al modelo de **Model Garden**: Gemini por defecto o Claude si el equipo lo eligió para tareas de razonamiento largo.', flows: ['runtime>model', 'model>runtime'] },
+    { title: '4 · Herramientas vía Agent Gateway', body: 'Toda llamada saliente pasa por **Agent Gateway**, que valida que la herramienta esté en Agent Registry y que la identidad del agente tenga permiso. Luego llega al MCP de inventario.', flows: ['runtime>gw', 'gw>mcp', 'mcp>gw'] },
+    { title: '5 · Conocimiento', body: 'Para el procedimiento de reposición urgente, consulta **Agent Search** sobre los manuales de operaciones, también a través del gateway.', flows: ['runtime>gw', 'gw>search'] },
+    { title: '6 · Respuesta y trazas', body: 'El agente responde en Gemini Enterprise, actualiza la memoria y deja trazas en Cloud Trace para evaluación online.', flows: ['runtime>ge', 'ge>user', 'runtime>memory', 'runtime>obs'] },
+  ],
+}
+
+export const gcpAgentGateway: IsoSpec = {
+  id: 'gcp-agent-gateway',
+  title: 'Gobernanza con Agent Gateway (ingress y egress)',
+  summary:
+    '**Agent Gateway** es la puerta de entrada y salida del tráfico agéntico. En modo **ingress** controla qué clientes (Gemini CLI, Claude Code, Cursor) llegan a tus agentes; en modo **egress** decide a qué herramientas, MCP y agentes puede llamar cada agente según su **Agent Identity**, el **Agent Registry**, IAM y **Model Armor**.',
+  height: 480,
+  nodes: [
+    { id: 'client', label: 'Cliente', sub: 'Gemini CLI · Claude Code', at: [-0.6, 0], shape: 'person', tone: 'user', icon: 'terminal', info: 'Clientes de desarrollo o apps que consumen agentes y herramientas alojados en Google Cloud.' },
+    { id: 'ingress', label: 'Ingress', sub: 'Agent Gateway', at: [2.7, 0], shape: 'hex', tone: 'gateway', icon: 'router', info: 'Modo *Client-to-Agent*. Controla qué clientes llegan al agente; admite políticas de *Semantic Governance* (restricciones en lenguaje natural). Agent Runtime soporta ingress y egress; Gemini Enterprise solo egress.' },
+    { id: 'agent', label: 'Agente ADK', sub: 'Agent Runtime', at: [6.4, 0], shape: 'tall', tone: 'agent', icon: 'bot', info: 'El agente se ejecuta con su propia **Agent Identity**, gestionada por la plataforma.' },
+    { id: 'identity', label: 'Agent Identity', sub: 'SPIFFE ID', at: [6.4, 3.4], shape: 'box', tone: 'guard', icon: 'key', info: 'Identidad única y gestionada por agente, basada en SPIFFE, usada para control de acceso y auditoría. La API `agentidentity.googleapis.com` estaba en preview a jun 2026.' },
+    { id: 'armor', label: 'Model Armor', sub: 'inyección · fuga de datos', at: [6.4, -3.4], shape: 'diamond', tone: 'guard', icon: 'shield', info: 'Inspecciona el tráfico para detectar *prompt injection*, fuga de datos sensibles y contenido dañino. Integrado con Agent Gateway en GA desde el 24-06-2026.' },
+    { id: 'egress', label: 'Egress', sub: 'Agent Gateway', at: [9.6, 0], shape: 'hex', tone: 'gateway', icon: 'router', info: 'Modo *Agent-to-Anywhere*: todo lo que el agente llama sale por aquí. Para tráfico MCP, el gateway puede leer la petición y aplicar políticas por herramienta concreta.' },
+    { id: 'registry', label: 'Agent Registry', sub: 'destinos permitidos', at: [9.6, -3.4], shape: 'stack', tone: 'data', icon: 'list', info: 'Catálogo central de agentes, herramientas y servidores MCP (GA 18-06-2026, con soporte A2A v1.0). Sus entradas definen los destinos de salida permitidos.' },
+    { id: 'iam', label: 'IAM + IAP', sub: 'política por tool', at: [9.6, 3.4], shape: 'diamond', tone: 'guard', icon: 'lock', info: 'Políticas IAM que restringen a un agente (por su SPIFFE ID) a herramientas o métodos concretos. IAP está activo por defecto en egress y puede correr en modo *dry-run* solo auditoría.' },
+    { id: 'mcp', label: 'Servidor MCP', sub: 'Cloud Run / SaaS', at: [13, -1.7], shape: 'box', tone: 'tool', icon: 'plug', info: 'Herramientas permitidas: p. ej. `get_stock` sí, `delete_sku` no para este agente.' },
+    { id: 'peer', label: 'Agente remoto', sub: 'A2A v1.0', at: [13, 1.7], shape: 'tall', tone: 'agent', icon: 'network', scale: 0.85, info: 'Otro agente (de otro equipo o proveedor) registrado en Agent Registry y alcanzado por A2A.' },
+  ],
+  edges: [
+    { from: 'client', to: 'ingress' },
+    { from: 'ingress', to: 'agent' },
+    { from: 'agent', to: 'identity', dashed: true },
+    { from: 'agent', to: 'egress' },
+    { from: 'egress', to: 'armor', route: 'z' },
+    { from: 'egress', to: 'registry' },
+    { from: 'egress', to: 'iam' },
+    { from: 'egress', to: 'mcp', route: 'z' },
+    { from: 'egress', to: 'peer', route: 'z' },
+  ],
+  steps: [
+    { title: '1 · Ingress', body: 'Un desarrollador usa Gemini CLI para hablar con el agente. El gateway en modo **client-to-agent** decide si ese cliente puede llegar y aplica *Semantic Governance* si está configurada.', flows: ['client>ingress', 'ingress>agent'] },
+    { title: '2 · El agente actúa con su identidad', body: 'El agente no usa una cuenta de servicio compartida: tiene su propia **Agent Identity** (SPIFFE), que es lo que verán las políticas y la auditoría.', flows: ['agent>identity'], focus: ['agent', 'identity'] },
+    { title: '3 · Egress: ¿destino registrado?', body: 'El agente quiere llamar a un servidor MCP. El gateway en modo **agent-to-anywhere** comprueba que el destino exista en **Agent Registry**; lo no registrado no sale.', flows: ['agent>egress', 'egress>registry'] },
+    { title: '4 · Autorización por herramienta', body: 'Con la identidad del agente, **IAM** decide si puede invocar esa herramienta concreta (para MCP, el gateway lee el nombre del tool en la petición). IAP puede ir primero en *dry-run* para auditar.', flows: ['egress>iam'], focus: ['egress', 'iam'] },
+    { title: '5 · Model Armor', body: '**Model Armor** inspecciona la petición y la respuesta: bloquea fugas de datos sensibles o instrucciones inyectadas en resultados de herramientas.', flows: ['egress>armor', 'armor>egress'] },
+    { title: '6 · Destinos permitidos', body: 'Solo entonces el tráfico llega al servidor MCP o al agente remoto vía A2A. Todo queda trazado (Cloud Trace para el gateway está en preview desde sep 2026).', flows: ['egress>mcp', 'egress>peer'] },
+  ],
+}

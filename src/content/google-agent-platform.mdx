@@ -1,0 +1,228 @@
+El 22 de abril de 2026, en Cloud Next '26, Google presentó **Gemini Enterprise Agent Platform** como la "evolución de Vertex AI". No es solo un cambio de marca: la plataforma se reorganizó alrededor del ciclo de vida de un agente (construir, escalar, gobernar y optimizar) y sumó piezas de gobierno que antes no existían, como **Agent Gateway** y **Agent Registry**. Si tu documentación interna, tus tutoriales o tu IaC dicen "Vertex AI Agent Engine", este artículo te ayuda a traducir y a ubicar cada componente.
+
+Aunque el lector de referencia de esta guía corre en AWS, Google Cloud importa por dos razones: **ADK** es el framework de Google y su camino "nativo" de despliegue es Agent Runtime, y muchas empresas son multinube (datos en BigQuery, agentes en AWS, empleados en Workspace).
+
+## Qué cambió de nombre
+
+La tabla de renombres más útil para el día a día (estado a octubre de 2026):
+
+| Antes (Vertex AI) | Ahora (Agent Platform) |
+|---|---|
+| Vertex AI Platform | Gemini Enterprise Agent Platform |
+| Vertex AI API | Gemini Enterprise Agent Platform API |
+| Vertex AI Studio | Agent Studio |
+| Vertex AI Agent Engine | **Agent Runtime** |
+| Vertex AI Agent Engine Sessions / Memory Bank | Agent Platform **Sessions** / **Memory Bank** |
+| Vertex AI Search | **Agent Search** |
+| Vertex AI Vector Search | Vector Search |
+| Vertex AI RAG Engine | RAG Engine on Gemini Enterprise Agent Platform |
+| Vertex AI Model Registry / Endpoints | Model Registry / Endpoints |
+| Vertex AI Pipelines / Workbench / Training | Pipelines / Workbench / Managed Training |
+| Google Agentspace | **Gemini Enterprise** (producto para empleados) |
+
+<Callout type="info" title="Nombres nuevos, recursos viejos">
+El cambio de nombre no rompe de inmediato el código existente, pero el SDK se está moviendo: la documentación de Agent Runtime indica que el antiguo módulo `vertexai.agent_engines` migra a `agentplatform.Client().runtimes`, mientras que el recurso de API sigue llamándose `ReasoningEngine`. Verás ambos nombres conviviendo en consolas, permisos IAM y Terraform durante un tiempo.
+</Callout>
+
+## Los cuatro pilares
+
+Agent Platform agrupa sus servicios en cuatro pilares. Es un buen mapa mental para comparar con AWS y Azure:
+
+| Pilar | Para qué | Componentes principales |
+|---|---|---|
+| **Build** | Diseñar y desarrollar agentes | ADK, Agent Studio (canvas low-code), Agent Garden (plantillas), Model Garden, RAG Engine, Vector Search, Managed Agents API <Badge tone="preview">Preview</Badge> |
+| **Scale** | Ejecutar agentes con estado | Agent Runtime, Sessions, Memory Bank, Code Execution (sandbox Python) |
+| **Govern** | Controlar y catalogar | Agent Registry, Agent Identity, Agent Gateway, Model Armor, políticas de gobierno semántico |
+| **Optimize** | Medir y mejorar | Evaluación (autoraters multiturno, evaluación online), simulación, observabilidad (Unified Trace Viewer), optimización de prompts |
+
+## Agent Runtime (ex Agent Engine)
+
+**Agent Runtime** es el runtime gestionado para agentes: autoescalado, arranques en frío rápidos y soporte para agentes de larga duración. Su relación con los frameworks tiene tres niveles:
+
+- **Integración completa con ADK** (Python y Go): despliegas con el CLI de ADK y obtienes sesiones, memoria y trazas sin configuración extra.
+- **Plantillas gestionadas** para LangChain, LangGraph, AG2 y LlamaIndex.
+- **Plantilla personalizada o contenedor** para CrewAI o cualquier framework y lenguaje, mientras respete el contrato del runtime. Puedes desplegar desde una imagen en Artifact Registry o desde un Dockerfile que la plataforma construye.
+
+Alrededor del runtime viven los servicios de estado:
+
+- **Sessions** guarda los eventos y el estado de cada conversación (en ADK, `VertexAiSessionService`). GA desde diciembre de 2025; endpoints multirregionales y globales GA desde el 17-06-2026 (sin CMEK en el endpoint global).
+- **Memory Bank** da memoria persistente entre sesiones: extrae hechos de las conversaciones y los consolida por usuario. GA desde diciembre de 2025; *memory profiles* e `IngestEvents` GA en julio de 2026.
+- **Code Execution** ejecuta Python generado por el agente en un sandbox seguro.
+- **A2A** para sistemas multiagente está en <Badge tone="preview">Preview</Badge> en Agent Runtime, aunque Agent Registry ya soporta A2A v1.0 en GA.
+
+Otros datos útiles: Agent Runtime cumple **VPC-SC**, las *agent revisions* con *traffic splitting* están en preview pública desde mayo de 2026 y la observabilidad con trazas por defecto para agentes ADK es GA desde junio de 2026.
+
+### Arquitectura de referencia
+
+Así encaja todo para un agente de operaciones que consulta inventario y abre órdenes de reposición:
+
+<Diagram id="gcp-arquitectura-adk" />
+
+## Gobierno: Agent Gateway, Registry, Identity y Model Armor
+
+El pilar *Govern* es la gran novedad de 2026. Cuatro piezas trabajan juntas:
+
+<Cards cols={2}>
+  <Card title="Agent Gateway" tag="GA 18-06-2026">
+    Punto central de aplicación de políticas para el tráfico agéntico. Modo **ingress** (cliente → agente) y modo **egress** (agente → herramientas, MCP, APIs u otros agentes).
+  </Card>
+  <Card title="Agent Registry" tag="GA 18-06-2026">
+    Catálogo central de agentes, herramientas y servidores MCP de la organización, con soporte A2A v1.0 y Terraform. Define qué destinos están permitidos.
+  </Card>
+  <Card title="Agent Identity" tag="API en preview">
+    Identidad única y gestionada por agente (basada en SPIFFE) para control de acceso y auditoría, en lugar de cuentas de servicio compartidas.
+  </Card>
+  <Card title="Model Armor" tag="GA en Gateway 24-06-2026">
+    Inspección de prompts y respuestas: *prompt injection*, fuga de datos sensibles y contenido dañino, aplicada en el gateway.
+  </Card>
+</Cards>
+
+El patrón es el mismo que en AWS con AgentCore Gateway + Policy: **sacar el gobierno del código del agente** y ponerlo en un punto de red que el agente no puede saltarse. Recorre el flujo:
+
+<Diagram id="gcp-agent-gateway" />
+
+Algunos matices operativos que conviene conocer:
+
+- **Agent Runtime** soporta ambos modos (ingress y egress); **Gemini Enterprise** solo egress.
+- En egress, **IAP** está activo por defecto y puede correr en modo *dry-run* (solo auditoría): úsalo para descubrir qué llamadas hacen tus agentes antes de bloquear.
+- Para tráfico **MCP**, el gateway analiza la petición y permite políticas por herramienta concreta (p. ej. permitir `get_stock` y denegar `delete_sku`).
+- En ingress, las políticas de *Semantic Governance* (restricciones en lenguaje natural) no se pueden combinar con Model Armor en el mismo gateway.
+- Desde septiembre de 2026 el gateway aplica perímetros **VPC Service Controls**, y la integración con Cloud Trace está en preview.
+
+## Conocimiento: RAG Engine y Agent Search
+
+Google ofrece dos niveles de abstracción para RAG:
+
+| | RAG Engine | Agent Search (ex Vertex AI Search) |
+|---|---|---|
+| Qué es | Pipeline RAG configurable: ingesta, chunking, embeddings, recuperación | Búsqueda empresarial gestionada "llave en mano" |
+| Vector store | RagManagedDb (por defecto), Vector Search, Feature Store, Pinecone, Weaviate | Gestionado por el servicio |
+| Control | Alto: eliges embeddings, store y parámetros | Bajo: conectores y ranking gestionados |
+| Seguridad | VPC-SC, CMEK | Controles de acceso del producto |
+| Úsalo cuando | Necesitas ajustar la recuperación o ya tienes un vector store | Quieres buscar en intranet, documentos y sitios con poco esfuerzo |
+
+Si tus datos ya están en Postgres, **AlloyDB AI** (con índice ScaNN) es otra alternativa natural fuera de RAG Engine. En cualquier caso, expón la recuperación como **herramienta** del agente; ver [RAG](/guia/rag).
+
+## Gemini Enterprise: agentes para empleados
+
+**Gemini Enterprise** (antes Google Agentspace) es el producto de cara al empleado: chat, búsqueda empresarial y un catálogo de agentes, con SSO y conectores a las fuentes corporativas. No es una plataforma de desarrollo: es el **canal** donde los empleados encuentran y usan agentes, incluidos los que construyes con ADK y despliegas en Agent Runtime. Piensa en él como el equivalente de publicar un agente de Foundry en Teams/Microsoft 365 Copilot.
+
+## Claude en Model Garden
+
+Model Garden incluye modelos de Google, de terceros y abiertos. Claude está disponible como servicio gestionado, facturado en tu proyecto de Google Cloud. Según las release notes, en 2026 llegaron Opus 5 (24-07), **Opus 5.5** (22-09), **Sonnet 5.5** (28-09) y **Haiku 5.5** (07-10), entre otros. Esto permite que un agente ADK en Agent Runtime use Claude sin salir de GCP ni gestionar claves de Anthropic, con las cuotas y la facturación del proyecto.
+
+<Callout type="tip" title="Mismo modelo, distinta nube">
+Si tu organización tiene Claude en Bedrock (AWS) y en Model Garden (GCP), el agente puede elegir el proveedor más cercano a los datos o servir de fallback. Un AI gateway como LiteLLM unifica ambos detrás de un único nombre de modelo; ver [Gateways](/guia/gateways).
+</Callout>
+
+## Desplegar ADK: Agent Runtime, Cloud Run o GKE
+
+Un agente ADK típico, con herramientas expuestas por un servidor MCP remoto:
+
+```python title="operaciones_agent/agent.py"
+from google.adk.agents import Agent
+from google.adk.tools.mcp_tool import McpToolset
+from google.adk.tools.mcp_tool.mcp_session_manager import StreamableHTTPConnectionParams
+
+inventario = McpToolset(
+    connection_params=StreamableHTTPConnectionParams(
+        url="https://mcp-inventario-xxxx.a.run.app/mcp",   # servidor MCP en Cloud Run
+    ),
+    tool_filter=["get_stock", "create_replenishment_order"],  # mínimo privilegio también en el cliente
+)
+
+root_agent = Agent(
+    name="operaciones",
+    model="gemini-flash-latest",
+    instruction=(
+        "Ayudas al equipo de operaciones con inventario y reposición. "
+        "Antes de crear una orden de reposición, confirma bodega, SKU y cantidad con el usuario."
+    ),
+    tools=[inventario],
+)
+```
+
+El mismo código se despliega en Agent Runtime o en Cloud Run cambiando solo el comando:
+
+<CodeTabs labels={["Agent Runtime", "Cloud Run"]}>
+
+```bash title="deploy-agent-runtime.sh"
+# Despliegue gestionado: sesiones, memoria y trazas integradas
+adk deploy agent_engine \
+  --project=$PROJECT_ID \
+  --region=us-central1 \
+  --display_name="Agente de Operaciones" \
+  operaciones_agent
+```
+
+```bash title="deploy-cloud-run.sh"
+# Contenedor serverless; tú eliges dónde guardar las sesiones
+adk deploy cloud_run \
+  --project=$GOOGLE_CLOUD_PROJECT \
+  --region=$GOOGLE_CLOUD_LOCATION \
+  --service_name=agente-operaciones \
+  --with_ui \
+  operaciones_agent
+```
+
+</CodeTabs>
+
+El subcomando del CLI todavía se llama `agent_engine` en la documentación de ADK, aunque el producto sea Agent Runtime. Para **GKE**, la documentación de ADK ofrece una guía específica (contenerizar el agente y desplegarlo en el clúster); no hay un único comando estándar que recomendemos aquí.
+
+| | Agent Runtime | Cloud Run | GKE |
+|---|---|---|---|
+| Modelo operativo | Totalmente gestionado para agentes | Contenedor serverless genérico | Kubernetes, tú operas el clúster |
+| Sesiones y memoria | Sessions + Memory Bank integrados | Configuras `--session_service_uri` (p. ej. Agent Runtime Sessions o una BD) | Igual que Cloud Run |
+| Gobierno | Agent Gateway ingress + egress, Agent Identity | Integración manual (IAM, VPC, Apigee) | Máximo control de red; integración manual |
+| Escala y costo | Escala a demanda; precio de la plataforma | Escala a cero; pagas por request/CPU | Pagas nodos; eficiente a gran volumen |
+| Ideal para | Equipos que quieren lo nativo de ADK con menos operación | Agentes HTTP simples, prototipos, equipos que ya usan Cloud Run | Plataformas internas, modelos abiertos propios, requisitos de red estrictos |
+
+## Equivalencias con AWS
+
+Si vienes de AWS (o tu empresa usa ambas nubes), esta tabla traduce los conceptos. No son idénticos uno a uno, pero cumplen el mismo rol:
+
+| Necesidad | Google Agent Platform | AWS |
+|---|---|---|
+| Runtime gestionado para agentes | Agent Runtime | AgentCore Runtime |
+| Agente declarativo sin código | Managed Agents API (preview), Agent Studio | AgentCore Harness |
+| Estado de la conversación | Sessions | AgentCore Memory (corto plazo) |
+| Memoria de largo plazo | Memory Bank | AgentCore Memory (estrategias de largo plazo) |
+| Gobierno de llamadas a herramientas | Agent Gateway (egress) + IAM por herramienta | AgentCore Gateway + Policy (Cedar) |
+| Catálogo de agentes y MCP | Agent Registry | AWS Agent Registry |
+| Identidad de agente | Agent Identity (SPIFFE) | AgentCore Identity |
+| Filtros de contenido e inyección | Model Armor | Bedrock Guardrails |
+| RAG gestionado | RAG Engine, Agent Search | Knowledge Bases, Managed Knowledge Base |
+| Claude como servicio | Model Garden | Bedrock (perfiles de inferencia) |
+
+La consecuencia práctica: si escribes el agente con un framework portable (ADK, LangGraph, Strands) y conectas herramientas por **MCP** y otros agentes por **A2A**, el costo de mover un agente entre nubes se concentra en la capa de despliegue y gobierno, no en la lógica. Elige la plataforma donde están **los datos y los usuarios**: si tus empleados viven en Workspace y tus datos en BigQuery, Agent Platform y Gemini Enterprise reducen mucha fricción; si tus sistemas transaccionales están en AWS, AgentCore suele ganar aunque uses ADK.
+
+## Errores comunes
+
+<Callout type="warning" title="Mezclar nombres viejos y nuevos en IaC">
+Terraform, IAM y la consola pueden mostrar `ReasoningEngine`, `aiplatform` o "Agent Engine" mientras la documentación habla de Agent Runtime. Documenta la equivalencia en tu repositorio para que nadie cree recursos duplicados creyendo que son productos distintos.
+</Callout>
+
+<Callout type="warning" title="Dar al agente la cuenta de servicio del proyecto">
+Una cuenta de servicio con permisos amplios convierte cualquier inyección de prompt en un incidente. Usa **Agent Identity** y políticas por herramienta en **Agent Gateway**; empieza en *dry-run* para ver qué llama realmente el agente.
+</Callout>
+
+<KeyPoints>
+
+- Vertex AI ahora es **Gemini Enterprise Agent Platform** (abr 2026): Agent Engine → **Agent Runtime**, Vertex AI Search → **Agent Search**, Agentspace → **Gemini Enterprise**.
+- Cuatro pilares: **Build, Scale, Govern, Optimize**.
+- Agent Runtime es el destino natural de ADK, con **Sessions** y **Memory Bank** gestionados; A2A en preview.
+- **Agent Gateway** y **Agent Registry** (GA jun 2026) más **Model Armor** sacan el gobierno del código del agente.
+- Claude está disponible en **Model Garden** (Sonnet/Opus/Haiku 5.5 desde sep-oct 2026).
+
+</KeyPoints>
+
+## Siguientes pasos
+
+<Cards cols={3}>
+  <Card title="Google ADK" tag="framework" href="/guia/google-adk">El framework a fondo: agentes, herramientas, sesiones y A2A.</Card>
+  <Card title="AWS Bedrock y AgentCore" tag="plataforma" href="/guia/aws-bedrock-agentcore">Compara Agent Runtime con AgentCore Runtime.</Card>
+  <Card title="Microsoft Foundry y Cloudflare" tag="plataforma" href="/guia/microsoft-foundry-cloudflare">El resto del mapa y la comparativa multinube.</Card>
+  <Card title="A2A" tag="protocolo" href="/guia/a2a">Agent Cards, tareas y delegación entre agentes.</Card>
+  <Card title="Multiagente con A2A" tag="arquitectura" href="/guia/arquitectura-multiagente-a2a">Una arquitectura de referencia con agentes en varias plataformas.</Card>
+  <Card title="Seguridad y gobernanza" tag="producción" href="/guia/seguridad-gobernanza">Identidad de agentes, mínimo privilegio y guardrails.</Card>
+</Cards>

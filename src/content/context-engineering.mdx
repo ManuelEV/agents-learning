@@ -1,0 +1,290 @@
+**Context engineering** es el arte de decidir **qué tokens entran en la ventana de contexto del modelo en cada paso** —instrucciones, herramientas, historial, memoria, documentos— y cuáles se quedan fuera. Anthropic lo plantea como la evolución natural del *prompt engineering*: ya no se trata de encontrar las palabras exactas para un prompt, sino de **curar continuamente el estado** que ve un agente que trabaja durante decenas o cientos de turnos.
+
+La razón es práctica. En un agente, la ventana se llena sola: cada llamada a herramienta agrega resultados, cada turno agrega historial. Si no la gestionas, el agente se vuelve más lento, más caro y, lo más grave, **peor**.
+
+## El contexto es un presupuesto de atención finito
+
+Los LLMs, igual que las personas, tienen una capacidad de atención limitada. La arquitectura transformer hace que cada token se relacione con todos los demás (n² relaciones para n tokens), y los modelos se entrenan mayoritariamente con secuencias más cortas que sus ventanas máximas. Consecuencia: a medida que crece el contexto, **la capacidad del modelo de recuperar información precisa y razonar sobre ella se degrada**. Anthropic llama a este fenómeno **context rot**.
+
+No es un precipicio sino una pendiente: el modelo sigue funcionando con ventanas grandes, pero con menos precisión. De ahí el principio rector:
+
+<Callout type="tip" title="El principio">
+Busca **el conjunto mínimo de tokens de alta señal** que maximice la probabilidad del resultado que quieres. Cada token que agregas compite por la atención del modelo con los que ya están.
+</Callout>
+
+## Anatomía de la ventana en cada turno
+
+El harness del agente compone la ventana a partir de varias fuentes. Recorre el diagrama para ver el orden y por qué importa:
+
+<Diagram id="contexto-ensamblaje" height={560} />
+
+Hay dos decisiones de diseño escondidas en ese orden: **lo estable va primero** (para aprovechar el prompt caching, que vemos más abajo) y **lo que no es imprescindible no entra por defecto**: se recupera bajo demanda.
+
+## El system prompt a la "altitud" correcta
+
+Anthropic describe dos modos de falla opuestos al escribir instrucciones:
+
+| Demasiado bajo | Altitud correcta | Demasiado alto |
+|---|---|---|
+| Lógica frágil codificada en el prompt: "si el cliente dice X y el pedido está en estado Y, responde Z" | Heurísticas claras y específicas que guían el comportamiento, dejando espacio al criterio del modelo | Vaguedades que asumen contexto compartido: "sé útil y resuelve los problemas del cliente" |
+| Se rompe con cada caso no previsto; mantenimiento caro | Robusto ante casos nuevos | El modelo no tiene señales concretas |
+
+Algunas prácticas que funcionan:
+
+- **Secciones explícitas** (con encabezados Markdown o etiquetas XML): rol, contexto de negocio, uso de herramientas, formato de salida, qué hacer ante dudas.
+- **Empieza mínimo** con el mejor modelo disponible, prueba y agrega instrucciones solo para corregir fallas observadas. "Mínimo" no significa corto: significa sin relleno.
+- **Ejemplos canónicos y diversos** en vez de una lista exhaustiva de casos borde. Para un LLM, los ejemplos valen más que mil reglas.
+
+```markdown title="system_prompt_soporte.md"
+## Rol
+Eres el agente de postventa de una cadena de retail. Resuelves cambios,
+devoluciones y seguimiento de pedidos.
+
+## Cómo trabajar
+- Consulta siempre el estado real del pedido antes de prometer nada.
+- Las políticas vigentes están en la base de conocimiento: búscalas, no las recuerdes.
+- Si el cliente pide algo fuera de política, explica la alternativa más cercana.
+
+## Acciones con impacto
+Cambios de dirección y notas de crédito requieren confirmación explícita del
+cliente en el mismo turno. Montos sobre USD 200 se derivan a un ejecutivo.
+
+## Formato
+Respuestas de máximo 4 frases. Cita el número de pedido y la fecha prometida.
+```
+
+## Herramientas: la interfaz agente-computadora (ACI)
+
+Las herramientas definen el contrato entre el agente y su entorno, y sus definiciones viajan en **cada** llamada. Anthropic recomienda dedicarles tanto esfuerzo como a una interfaz para humanos (lo que llaman **ACI**, *agent-computer interface*):
+
+<Cards cols={2}>
+  <Card title="Pocas y distintas" tag="selección">
+    Si un ingeniero humano no puede decir con certeza qué herramienta usar en una situación, el agente tampoco. Evita conjuntos inflados con funcionalidad solapada.
+  </Card>
+  <Card title="Pensadas para tareas, no para endpoints" tag="diseño">
+    Mejor `search_contacts` que `list_contacts` (que inunda el contexto). Agrupa con prefijos por servicio (*namespacing*).
+  </Card>
+  <Card title="Resultados eficientes en tokens" tag="salida">
+    Paginación, filtros y truncado con valores por defecto sensatos. Nombres legibles en vez de UUIDs. Claude Code limita las respuestas de herramientas a 25.000 tokens por defecto.
+  </Card>
+  <Card title="Poka-yoke" tag="a prueba de errores">
+    Diseña los parámetros para que sea difícil usarlas mal: Anthropic cuenta que exigir rutas absolutas en vez de relativas eliminó una clase entera de errores de su agente de código.
+  </Card>
+</Cards>
+
+Un patrón concreto del artículo *Writing effective tools for agents*: un parámetro `response_format` que deja al agente elegir entre una respuesta **concisa** o **detallada**. En su ejemplo, la versión concisa usaba alrededor de un tercio de los tokens.
+
+```python title="tools_pedidos.py"
+from typing import Literal
+from strands import tool
+
+@tool
+def pedidos_buscar(cliente_email: str, estado: str = "todos",
+                   response_format: Literal["concise", "detailed"] = "concise",
+                   limite: int = 5) -> dict:
+    """Busca pedidos de un cliente, del más reciente al más antiguo.
+
+    Args:
+        cliente_email: Email del cliente, p. ej. "ana@correo.cl".
+        estado: "en_preparacion", "despachado", "entregado" o "todos".
+        response_format: "concise" devuelve número, estado y fecha prometida;
+            "detailed" agrega líneas de producto y eventos de despacho.
+        limite: Máximo de pedidos a devolver (1-20).
+    """
+    pedidos = erp.buscar_pedidos(cliente_email, estado)[: min(limite, 20)]
+    if not pedidos:   # error accionable, no un traceback
+        return {"resultado": [], "sugerencia": "Verifica el email o usa estado='todos'."}
+    campos = ("numero", "estado", "fecha_prometida")
+    if response_format == "concise":
+        pedidos = [{k: p[k] for k in campos} for p in pedidos]
+    return {"resultado": pedidos, "hay_mas": len(pedidos) == limite}
+```
+
+Si usas [MCP](/guia/mcp), las mismas reglas aplican a las herramientas de los servidores que conectes: un servidor con 60 herramientas genéricas consume contexto en cada turno aunque el agente use solo dos. Filtra qué herramientas expones a cada agente.
+
+## Recuperación just-in-time
+
+La estrategia clásica es **precargar** todo lo potencialmente relevante (por ejemplo, con RAG antes de la primera llamada). La alternativa que gana terreno en agentes es la **recuperación just-in-time**: el agente mantiene **referencias livianas** (rutas, IDs, consultas guardadas, URLs) y carga el contenido con herramientas solo cuando lo necesita.
+
+Así trabajan los agentes de código: en vez de meter el repositorio en el contexto, usan `glob`, `grep` o `head` para explorar. Los metadatos de las referencias también son señal: un archivo `tests/test_pagos.py` dice mucho sin abrirlo.
+
+| | Precarga (upfront) | Just-in-time |
+|---|---|---|
+| Latencia | Baja (todo está ahí) | Más alta (exploración en runtime) |
+| Uso de contexto | Alto, mucho ruido | Bajo, solo lo necesario |
+| Riesgo | Context rot, datos obsoletos | El agente puede no buscar lo que necesita |
+| Ideal para | Contexto pequeño y siempre relevante | Corpus grandes o dinámicos |
+
+En la práctica conviene un **híbrido**: Claude Code, por ejemplo, carga archivos como `CLAUDE.md` al inicio y explora el resto bajo demanda. En un agente de soporte, el perfil del cliente se precarga y las políticas se buscan cuando hacen falta. Lo profundizamos en [RAG](/guia/rag), donde el *agentic RAG* es justamente esto.
+
+## Tareas largas: compactación, notas y sub-agentes
+
+Cuando una tarea excede lo que cabe en una ventana (una migración, una investigación de horas), Anthropic propone tres técnicas complementarias:
+
+<Steps>
+
+1. **Compactación**: cuando la conversación se acerca al límite, se resume y se reinicia la ventana con ese resumen. El arte está en qué conservar (decisiones de arquitectura, errores sin resolver, detalles de implementación) y qué descartar (resultados de herramientas redundantes). La forma más segura y liviana es **limpiar resultados de herramientas antiguos**: una vez usados, rara vez hace falta volver a verlos completos.
+2. **Notas estructuradas** (*agentic memory*): el agente escribe notas persistentes fuera de la ventana (un `NOTES.md`, una lista de tareas) y las relee después. En *Effective harnesses for long-running agents*, Anthropic usa un archivo de progreso (`claude-progress.txt`), una lista de funcionalidades en JSON y commits de git para que cada sesión retome donde quedó la anterior.
+3. **Sub-agentes con contexto limpio**: un agente principal coordina y delega búsquedas profundas a sub-agentes que exploran con su propia ventana y devuelven **solo un resumen condensado** (del orden de 1.000–2.000 tokens). El detalle queda aislado; el agente principal conserva una ventana despejada.
+
+</Steps>
+
+Los frameworks empiezan a traer esto de serie: los llamados *harness* (Strands Harness, el `HarnessAgent` de Vercel AI SDK, el Claude Agent SDK) incluyen compactación y gestión de contexto. AWS reporta en el blog de lanzamiento de Strands Harness (septiembre de 2026) una reducción de tokens de alrededor de 28–34% con truncado y compactación; tómalo como referencia del proveedor, no como garantía para tu caso.
+
+<Callout type="warning" title="La compactación pierde información">
+Un resumen demasiado agresivo borra justo el detalle que se vuelve crítico diez turnos después. Ajusta el prompt de compactación con trazas reales: primero maximiza el *recall* (que no falte nada importante) y luego recorta.
+</Callout>
+
+## Memoria: corto y largo plazo
+
+"Memoria" en agentes significa dos cosas distintas, con tecnologías distintas:
+
+<Diagram id="contexto-memoria" height={520} />
+
+- **Corto plazo (sesión)**: el historial de eventos y el estado de la conversación actual. Responde a "¿y mañana?" sabiendo que hablábamos del pedido 4512.
+- **Largo plazo**: hechos, preferencias y resúmenes **extraídos** de muchas sesiones, recuperados por búsqueda semántica. Responde a "este cliente prefiere retiro en tienda".
+
+| Plataforma / framework | Corto plazo | Largo plazo |
+|---|---|---|
+| **Google ADK** | `SessionService` (`InMemorySessionService`, `DatabaseSessionService`, `VertexAiSessionService`) + `session.state` | `MemoryService`: `InMemoryMemoryService` (pruebas), `VertexAiMemoryBankService` (extracción y consolidación gestionadas) |
+| **Google Agent Platform** | Agent Platform Sessions | **Memory Bank** (GA desde diciembre de 2025) |
+| **AWS AgentCore** | AgentCore Memory: eventos por sesión y actor | Estrategias de extracción (integradas, integradas con overrides o self-managed) que generan registros de largo plazo |
+| **LangGraph** | Checkpointers (`InMemorySaver`, `PostgresSaver`) por `thread_id` | **Stores** (`InMemoryStore` u otros persistentes) compartidos entre threads |
+
+En ADK, el estado de sesión admite prefijos con alcance distinto: sin prefijo (solo esta sesión), `user:` (todas las sesiones del usuario), `app:` (todos los usuarios de la app) y `temp:` (solo la invocación actual). Usarlos bien evita meter en la memoria de largo plazo cosas que son simplemente estado.
+
+<CodeTabs labels={["ADK + Memory Bank", "LangGraph"]}>
+
+```python title="agente_con_memoria.py"
+from google.adk.agents import Agent
+from google.adk.runners import Runner
+from google.adk.sessions import DatabaseSessionService
+from google.adk.memory import VertexAiMemoryBankService
+from google.adk.tools import load_memory
+
+async def guardar_en_memoria(callback_context):
+    # Envía la sesión al Memory Bank, que extrae y consolida recuerdos
+    await callback_context.add_session_to_memory()
+
+agent = Agent(
+    name="postventa", model="gemini-flash-latest",
+    instruction="Si el historial del cliente puede ayudar, usa load_memory.",
+    tools=[load_memory],                 # el agente decide cuándo recordar
+    after_agent_callback=guardar_en_memoria,
+)
+
+runner = Runner(
+    agent=agent, app_name="postventa",
+    session_service=DatabaseSessionService(db_url="postgresql://..."),   # corto plazo
+    memory_service=VertexAiMemoryBankService(                           # largo plazo
+        project="mi-proyecto", location="us-central1", agent_engine_id="123"),
+)
+```
+
+```python title="grafo_con_memoria.py"
+from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.store.memory import InMemoryStore
+
+DB_URI = "postgresql://..."
+with PostgresSaver.from_conn_string(DB_URI) as checkpointer:
+    checkpointer.setup()                 # crea las tablas la primera vez
+    store = InMemoryStore()              # en producción, un store persistente
+    graph = builder.compile(checkpointer=checkpointer, store=store)
+
+    # Corto plazo: cada conversación es un thread con su propio historial
+    config = {"configurable": {"thread_id": "cliente-881-conv-17"}}
+    graph.invoke({"messages": [("user", "¿Y mañana llega?")]}, config)
+```
+
+</CodeTabs>
+
+Los parámetros exactos de `VertexAiMemoryBankService` dependen de tu instancia de Agent Runtime; verifícalos en la [doc de memoria de ADK](https://adk.dev/sessions/memory/). Para preferir la precarga automática en lugar de la herramienta, ADK ofrece `PreloadMemoryTool`, que recupera memoria al inicio de cada turno.
+
+<Callout type="danger" title="La memoria es superficie de ataque">
+Un recuerdo es contexto que persiste y se reinyecta. Si un atacante logra que el agente "recuerde" una instrucción maliciosa, la ejecutará en sesiones futuras (*memory poisoning*, ASI06 en el OWASP Top 10 for Agentic Applications 2026). Acota la recuperación por usuario/tenant, valida lo que se escribe y define retención y borrado. Más en [seguridad y gobernanza](/guia/seguridad-gobernanza).
+</Callout>
+
+## Prompt caching: el contexto estable se paga una vez
+
+Si cada turno reenvía 8.000 tokens de system prompt y herramientas, estás pagando lo mismo una y otra vez. El **prompt caching** guarda el prefijo procesado y lo reutiliza: las lecturas de caché se facturan a una tarifa reducida y bajan la latencia.
+
+En Amazon Bedrock (octubre de 2026), con la Converse API:
+
+- Marcas el final de cada bloque estable con un `cachePoint`. Los Claude 5.5 admiten **hasta 4 checkpoints**, con un mínimo de **512 tokens** acumulados antes de cada uno, y TTL de **5 minutos o 1 hora** (`"ttl": "1h"`).
+- Los checkpoints se procesan en orden **`tools` → `system` → `messages`**, y son encadenados: **cambiar una herramienta invalida la caché del system prompt y de los mensajes**.
+- El TTL de 1 hora conviene cuando los turnos llegan con más de 5 minutos de separación (un usuario que tarda en responder, un sub-agente que trabaja largo rato). Si combinas ambos, las entradas de 1 hora deben ir antes que las de 5 minutos.
+- Las lecturas de caché no descuentan del rate limit, y `inputTokens` en la respuesta excluye los tokens cacheados: total = `inputTokens + cacheReadInputTokens + cacheWriteInputTokens`.
+
+```python title="converse_cache.py"
+import boto3
+
+bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
+CACHE_1H = {"cachePoint": {"type": "default", "ttl": "1h"}}
+
+tools = sorted(TOOL_SPECS, key=lambda t: t["toolSpec"]["name"])   # orden determinista
+resp = bedrock.converse(
+    modelId="global.anthropic.claude-sonnet-5-5",
+    toolConfig={"tools": tools + [CACHE_1H]},                       # checkpoint 1: tools
+    system=[{"text": SYSTEM_PROMPT}, CACHE_1H],                     # checkpoint 2: system
+    messages=historial + [{"role": "user", "content": [{"text": pregunta}]}],
+)
+uso = resp["usage"]
+print(uso.get("cacheReadInputTokens"), uso.get("cacheWriteInputTokens"), uso["inputTokens"])
+```
+
+<Callout type="tip" title="Orden determinista de herramientas">
+Si tu framework o tu gateway arma la lista de herramientas en orden variable (por ejemplo, según el orden en que respondieron varios servidores MCP), cada turno rompe la caché. Ordénalas por nombre. La especificación MCP 2026-07-28 exige justamente que `tools/list` devuelva un orden determinista para ayudar al caching.
+</Callout>
+
+## Agent Skills y AGENTS.md: contexto por capas
+
+Dos estándares abiertos, ambos hoy bajo la Agentic AI Foundation (AAIF) de la Linux Foundation, aplican el mismo principio de "cargar solo lo necesario":
+
+**Agent Skills** son carpetas con un `SKILL.md` (frontmatter con `name` y `description`, más instrucciones) y, opcionalmente, `scripts/`, `references/` y `assets/`. Usan **progressive disclosure** en tres niveles:
+
+<Steps>
+
+1. **Descubrimiento**: al inicio solo entran el `name` y la `description` de cada skill. Decenas de skills cuestan pocos tokens.
+2. **Activación**: cuando la tarea coincide, el agente carga el `SKILL.md` completo.
+3. **Ejecución**: scripts y archivos de referencia se leen o ejecutan bajo demanda, sin pasar necesariamente por el contexto.
+
+</Steps>
+
+El estándar se publicó como abierto en diciembre de 2025, tiene adopción en más de 70 plataformas y Anthropic lo donó a la AAIF el 22-10-2026. ADK y el Claude Agent SDK, entre otros, ya lo soportan.
+
+**AGENTS.md** es un "README para agentes": un Markdown libre en la raíz del repositorio (anidable en monorepos) con comandos de build y test, convenciones de estilo y reglas de seguridad. Más de 60.000 proyectos lo usan. Es contexto que se precarga, así que mantenlo corto y vigente: un AGENTS.md obsoleto es peor que ninguno.
+
+## Resumen de técnicas
+
+| Síntoma | Técnica |
+|---|---|
+| El agente ignora instrucciones o "se olvida" a mitad de tarea | Reducir contexto, ordenar el system prompt en secciones, compactar |
+| Elige mal entre herramientas | Menos herramientas, más distintas, con mejores descripciones y namespacing |
+| Los resultados de herramientas llenan la ventana | Paginación, filtros, `response_format`, limpiar resultados antiguos |
+| Costo y latencia altos en cada turno | Prompt caching con prefijo estable y herramientas en orden fijo |
+| Tareas que exceden una ventana | Notas estructuradas, compactación, sub-agentes con contexto limpio |
+| El agente no recuerda al usuario entre sesiones | Memoria de largo plazo con extracción y recuperación acotada |
+| Muchas capacidades especializadas | Agent Skills con progressive disclosure |
+
+<KeyPoints>
+
+- El contexto es un **presupuesto finito**: más tokens no significan mejores respuestas (*context rot*).
+- System prompt a la **altitud correcta**: heurísticas claras, secciones explícitas, ejemplos canónicos.
+- Las herramientas son contexto: **pocas, distintas, eficientes en tokens** y difíciles de usar mal.
+- Prefiere la recuperación **just-in-time** con referencias livianas; precarga solo lo siempre relevante.
+- Para tareas largas: **compactación**, **notas fuera de la ventana** y **sub-agentes** que devuelven resúmenes.
+- Separa memoria de **sesión** y de **largo plazo**; acota la recuperación por usuario.
+- Cachea el prefijo estable (`cachePoint`, TTL de 1 h cuando aplique) y mantén las herramientas en **orden determinista**.
+
+</KeyPoints>
+
+## Siguientes pasos
+
+<Cards cols={3}>
+  <Card title="Patrones de diseño" href="/guia/patrones-de-diseno">Chaining, routing, orquestador-workers y cuándo usar cada uno.</Card>
+  <Card title="RAG" href="/guia/rag">Recuperación híbrida, reranking y agentic RAG.</Card>
+  <Card title="MCP" href="/guia/mcp">Herramientas estándar y cómo filtrarlas por agente.</Card>
+  <Card title="AWS Bedrock y AgentCore" href="/guia/aws-bedrock-agentcore">Memory, Runtime y prompt caching en AWS.</Card>
+  <Card title="Google Agent Platform" href="/guia/google-agent-platform">Sessions y Memory Bank para agentes ADK.</Card>
+  <Card title="Orquestación avanzada" href="/guia/orquestacion-avanzada">Sub-agentes, ejecución durable y tareas largas.</Card>
+</Cards>

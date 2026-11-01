@@ -1,0 +1,374 @@
+Casi todos los sistemas con LLM que funcionan bien en producción se construyen combinando un puñado de **patrones simples y componibles**, no con frameworks exóticos. Esa es la conclusión central de *Building effective agents*, el artículo de Anthropic (diciembre de 2024) que se convirtió en el vocabulario común de la industria: **chaining**, **routing**, **paralelización**, **orquestador-workers**, **evaluator-optimizer** y, al final de la escalera, **agentes autónomos**.
+
+Conocer estos patrones te permite dos cosas: elegir la solución **más simple** que resuelve el problema y explicar con precisión qué hace tu sistema (y cuánto cuesta) a un arquitecto, un auditor o un equipo de finanzas.
+
+<Callout type="info" title="Workflows y agentes, otra vez">
+Los cinco primeros patrones son **workflows**: el código define la ruta y los LLMs son pasos dentro de ella. Solo en el último el modelo dirige su propio proceso. Si la distinción no te resulta familiar, repasa [¿Qué es un agente de IA?](/guia/que-es-un-agente).
+</Callout>
+
+## El bloque base: el LLM aumentado
+
+Todos los patrones se construyen con la misma pieza: un **LLM aumentado** con tres capacidades que el modelo decide usar por sí mismo:
+
+<Cards cols={3}>
+  <Card title="Recuperación" tag="sabe">
+    Genera sus propias consultas a una base de conocimiento o buscador. Es la base de [RAG](/guia/rag).
+  </Card>
+  <Card title="Herramientas" tag="actúa">
+    Elige qué API llamar y con qué argumentos. Hoy, cada vez más, expuestas vía [MCP](/guia/mcp).
+  </Card>
+  <Card title="Memoria" tag="recuerda">
+    Decide qué conservar entre turnos o sesiones. Lo vemos en [context engineering](/guia/context-engineering).
+  </Card>
+</Cards>
+
+La recomendación de Anthropic es invertir primero en que este bloque sea sólido: herramientas bien documentadas, con interfaz clara para el modelo (lo que llaman **ACI**, *agent-computer interface*). Un patrón sofisticado sobre herramientas mediocres falla igual, solo que más caro.
+
+## Los cuatro workflows clásicos
+
+Recorre cada pestaña del diagrama: son los patrones que vas a usar el 80% del tiempo. Todos tienen algo en común: **la estructura del flujo está escrita en tu código**.
+
+<Diagram ids={["patrones-chaining", "patrones-routing", "patrones-paralelizacion", "patrones-orquestador"]} height={520} />
+
+### Prompt chaining (con gates)
+
+Descompone la tarea en una **secuencia fija de pasos**, donde cada llamada LLM procesa la salida de la anterior. Entre pasos puedes insertar **gates**: verificaciones programáticas que deciden si el flujo continúa.
+
+- **Cuándo**: la tarea se divide limpiamente en subtareas fijas. Ejemplos: extraer datos de una factura → validar → proponer asiento contable; escribir un esquema de documento → verificar que cumple criterios → redactar el documento.
+- **Por qué funciona**: cada llamada es más fácil, así que es más precisa. Cambias **latencia por precisión**.
+- **Costo**: lineal en el número de pasos; la latencia total es la suma de los pasos.
+
+El gate es lo que separa un chaining de producción de un juguete. Debe ser **código determinista** siempre que puedas (JSON Schema, reglas de negocio, consultas a maestros), no otro LLM.
+
+### Routing
+
+Clasifica la entrada y la deriva a un **manejador especializado**. Así puedes optimizar el prompt de cada categoría sin que la mejora en una empeore las demás.
+
+- **Cuándo**: hay categorías claramente distintas que se manejan mejor por separado y la clasificación es confiable (con un LLM o un clasificador tradicional).
+- **Uso empresarial estrella**: **enrutar por costo**. Las preguntas frecuentes van a un modelo pequeño y rápido; los casos difíciles, a uno grande. Anthropic lo ejemplifica con Haiku para lo fácil y Sonnet para lo difícil.
+- **Ojo**: el router es un punto único de falla. Mide su precisión con un set etiquetado e incluye siempre una categoría "otro" con salida segura.
+
+### Paralelización
+
+Varias llamadas LLM trabajan **simultáneamente** y sus salidas se agregan con código. Tiene dos variantes:
+
+| Variante | Qué hace | Ejemplos |
+|---|---|---|
+| **Sectioning** | Divide la tarea en partes independientes que corren en paralelo | Revisar secciones de un contrato; un modelo responde mientras otro aplica guardrails; evaluar distintos aspectos de una respuesta |
+| **Voting** | Ejecuta la **misma** tarea varias veces con prompts distintos y vota | Revisar código en busca de vulnerabilidades; decidir si un contenido es inapropiado con umbral de votos |
+
+La paralelización gana **velocidad** (latencia ≈ la rama más lenta) o **confianza** (voting), pero el costo en tokens es la suma de todas las ramas. Un detalle útil: los LLMs rinden mejor cuando cada consideración se maneja en una llamada separada, con atención enfocada.
+
+### Orquestador-workers
+
+Un LLM central **descompone la tarea en tiempo de ejecución**, delega subtareas a workers y sintetiza sus resultados. Se parece a la paralelización, pero con una diferencia clave: **las subtareas no están predefinidas**; las decide el orquestador según la entrada.
+
+- **Cuándo**: no puedes predecir qué subtareas harán falta. Ejemplos: cambios de código que tocan un número variable de archivos; investigaciones que consultan fuentes distintas según la pregunta; análisis de margen que a veces requiere datos de compras y a veces no.
+- **Costo**: alto y variable. El sistema de investigación multiagente de Anthropic usa en torno a **15× los tokens** de un chat normal, aunque en su eval interna superó en **90,2%** a un agente único. Profundizamos en esa decisión en [orquestación avanzada](/guia/orquestacion-avanzada).
+
+## Evaluator-optimizer
+
+Un LLM **genera** una respuesta y otro la **evalúa** contra criterios explícitos; el feedback vuelve al generador en un loop.
+
+<Diagram id="patrones-evaluador" height={520} />
+
+Funciona bien cuando se cumplen dos condiciones, según Anthropic: **hay criterios de evaluación claros** y **la iteración mejora el resultado de forma demostrable** (un humano que da feedback lograría que el texto mejore, y un LLM es capaz de dar ese feedback). Ejemplos: traducción con matices, fichas de producto que deben ceñirse a una hoja técnica, búsquedas complejas en las que el evaluador decide si hace falta otra ronda.
+
+<Callout type="warning" title="Todo loop necesita un límite">
+Dos LLMs pueden discrepar indefinidamente. Fija un máximo de iteraciones (2–3 suele bastar), registra cada versión y, si se agota el límite, entrega el mejor intento marcado para revisión humana. Mide cuántas vueltas aportan realmente: muchas veces la segunda iteración captura casi toda la mejora.
+</Callout>
+
+## Agentes autónomos
+
+En el extremo de la escalera, el LLM **planifica y opera de forma independiente**: usa herramientas en un loop basado en el feedback del entorno (resultados de herramientas, ejecución de código), puede detenerse a pedir información o aprobación a una persona y termina al cumplir el objetivo o al alcanzar una condición de parada.
+
+Son adecuados para **problemas abiertos** en los que es difícil o imposible predecir el número de pasos y no puedes codificar una ruta fija. Exigen cierta confianza en el criterio del modelo, por lo que necesitas:
+
+- **Entornos de prueba (sandbox)** y evaluaciones extensas antes de producción.
+- **Guardrails** y aprobación humana en acciones irreversibles.
+- **Límites duros** de turnos, costo y tiempo.
+
+La autonomía tiene un costo: más latencia, más tokens (≈4× un chat, según Anthropic) y errores que se **acumulan**. Por eso los tres principios que propone Anthropic son: **simplicidad** en el diseño, **transparencia** (mostrar explícitamente los pasos de planificación) y un **ACI cuidado**, con herramientas documentadas y probadas, y diseñadas para que sea difícil usarlas mal (*poka-yoke*).
+
+## Multiagente: manager vs. handoffs
+
+Cuando un único agente ya no alcanza, la guía práctica de OpenAI (abril de 2025) describe dos formas de coordinar varios agentes:
+
+<Diagram id="patrones-manager-handoffs" height={520} />
+
+| | Manager (agentes como tools) | Descentralizado (handoffs) |
+|---|---|---|
+| Quién habla con el usuario | Siempre el manager | El agente que tiene el control en ese momento |
+| Control | Central: el manager orquesta y sintetiza | Distribuido: cada agente decide si transfiere |
+| Ideal para | Respuestas que combinan varios especialistas | Dominios donde un especialista lleva la conversación completa (triage → facturación) |
+| Riesgo típico | El manager se vuelve un cuello de botella de contexto | Ping-pong entre agentes, pérdida de visión global |
+
+La misma guía insiste en **maximizar primero un agente único** y dividir solo cuando aparece una de dos señales: **lógica compleja** (prompts con demasiados condicionales) o **sobrecarga de herramientas**. Esta última no depende tanto del número como de su similitud: según la guía, algunos agentes manejan bien más de 15 herramientas bien diferenciadas, y otros se confunden con menos de 10 que se solapan.
+
+## Del patrón al código: ADK y Strands
+
+Los frameworks implementan estos patrones con primitivas propias. Tabla de equivalencias a **octubre de 2026**:
+
+| Patrón | Google ADK 1.x | Google ADK 2.x (grafo) | AWS Strands |
+|---|---|---|---|
+| Chaining | `SequentialAgent` + `output_key` | `Workflow` con aristas en secuencia | `GraphBuilder` lineal o código Python |
+| Gate | Callback o agente custom | Nodo función que devuelve `Event(route=...)` | Arista con `condition=` |
+| Routing | `sub_agents` (delegación por descripción) | Diccionario de rutas en `edges` | Agents-as-tools o arista condicional |
+| Paralelización | `ParallelAgent` | Ramas paralelas del grafo | Nodos del `Graph` sin dependencias entre sí |
+| Orquestador-workers | `AgentTool` (agente como herramienta) | Agentes LLM dentro del grafo | **Agents as Tools** |
+| Evaluator-optimizer | `LoopAgent` + `escalate` | Ciclo en el grafo | `Graph` con ciclo y `set_max_node_executions` |
+| Handoffs | Transferencia entre `sub_agents` | — | **Swarm** (`handoff_to_agent`) |
+
+<Callout type="info" title="ADK 2.0 y los workflow agents">
+Desde ADK 2.0 (Python GA el 19-05-2026), la documentación indica que `SequentialAgent`, `ParallelAgent` y `LoopAgent` quedan **reemplazados** (*superseded*) por los **graph workflows** en Python y Go; en TypeScript están deprecados pero siguen funcionando. Si empiezas hoy, usa `Workflow`. Verás ambos estilos en código existente.
+</Callout>
+
+### Chaining con gate
+
+<CodeTabs labels={["ADK 2.x (Workflow)", "ADK 1.x (Sequential)", "Strands (Graph)"]}>
+
+```python title="factura_workflow.py"
+import json
+from google.adk import Agent, Event, Workflow
+
+MODEL = "gemini-flash-latest"
+
+extractor = Agent(name="extractor", model=MODEL,
+    instruction="Extrae proveedor, monto, moneda y vencimiento. Responde solo JSON.")
+redactor = Agent(name="redactor", model=MODEL,
+    instruction="Propón la imputación contable de la factura validada.")
+
+def gate(node_input: str):
+    """Gate programático: valida en código antes de gastar otra llamada."""
+    try:
+        f = json.loads(node_input)
+        ok = f["monto"] > 0 and f["moneda"] in ("CLP", "USD", "EUR")
+    except (ValueError, KeyError, TypeError):
+        ok = False
+    return Event(route=["ok" if ok else "revisar"])
+
+def a_revision(node_input: str) -> str:
+    return "Factura enviada a la cola de revisión humana"
+
+root_agent = Workflow(
+    name="procesar_factura",
+    edges=[
+        ("START", extractor, gate),                            # secuencia
+        (gate, {"ok": redactor, "revisar": a_revision}),       # gate → ruta
+    ],
+)
+```
+
+```python title="factura_sequential.py"
+from google.adk.agents import LlmAgent, SequentialAgent
+
+MODEL = "gemini-flash-latest"
+
+extractor = LlmAgent(name="extractor", model=MODEL,
+    instruction="Extrae proveedor, monto, moneda y vencimiento. Responde solo JSON.",
+    output_key="factura")              # guarda la salida en el estado de sesión
+
+redactor = LlmAgent(name="redactor", model=MODEL,
+    instruction="Factura extraída:\n{factura}\nPropón la imputación contable.")
+
+# Sin gate nativo: se implementa con un callback o un agente custom
+root_agent = SequentialAgent(name="procesar_factura", sub_agents=[extractor, redactor])
+```
+
+```python title="factura_graph.py"
+from strands import Agent
+from strands.multiagent import GraphBuilder
+
+MODEL = "global.anthropic.claude-sonnet-5-5"
+extractor = Agent(name="extractor", model=MODEL,
+    system_prompt="Extrae proveedor, monto, moneda y vencimiento. Responde solo JSON.")
+redactor = Agent(name="redactor", model=MODEL,
+    system_prompt="Propón la imputación contable de la factura validada.")
+
+def factura_valida(state) -> bool:
+    """Gate: la arista solo se recorre si el paso anterior produjo un monto."""
+    nodo = state.results.get("extraer")
+    return bool(nodo) and '"monto"' in str(nodo.result)
+
+builder = GraphBuilder()
+builder.add_node(extractor, "extraer")
+builder.add_node(redactor, "redactar")
+builder.add_edge("extraer", "redactar", condition=factura_valida)
+builder.set_entry_point("extraer")
+graph = builder.build()
+result = graph("Factura adjunta: ...")
+```
+
+</CodeTabs>
+
+El ejemplo de ADK 2.x está simplificado: asume que la salida del agente llega como texto al nodo función. Revisa la [doc de graph workflows](https://adk.dev/graphs/) para los tipos exactos de entrada entre nodos y para opciones como reintentos y entrada humana.
+
+### Paralelización y orquestador-workers
+
+<CodeTabs labels={["ADK: ParallelAgent", "ADK: AgentTool", "Strands: agents as tools"]}>
+
+```python title="revision_contrato.py"
+from google.adk.agents import LlmAgent, ParallelAgent, SequentialAgent
+
+MODEL = "gemini-flash-latest"
+pagos = LlmAgent(name="pagos", model=MODEL, output_key="r_pagos",
+    instruction="Revisa solo cláusulas de pago, multas y reajustes.")
+resp = LlmAgent(name="responsabilidad", model=MODEL, output_key="r_resp",
+    instruction="Revisa solo limitación de responsabilidad e indemnizaciones.")
+datos = LlmAgent(name="datos", model=MODEL, output_key="r_datos",
+    instruction="Revisa solo tratamiento de datos personales.")
+
+revision = ParallelAgent(name="revision_paralela", sub_agents=[pagos, resp, datos])
+informe = LlmAgent(name="informe", model=MODEL,
+    instruction="Consolida y prioriza riesgos:\n{r_pagos}\n{r_resp}\n{r_datos}")
+
+root_agent = SequentialAgent(name="revision_contrato", sub_agents=[revision, informe])
+```
+
+```python title="analisis_margen.py"
+from google.adk.agents import LlmAgent
+from google.adk.tools.agent_tool import AgentTool
+
+ventas = LlmAgent(name="analista_ventas", model="gemini-flash-latest",
+    description="Consulta ventas y márgenes por categoría en el DWH.",
+    instruction="Responde con cifras y la consulta usada.", tools=[consultar_dwh])
+compras = LlmAgent(name="analista_compras", model="gemini-flash-latest",
+    description="Analiza costos de compra por proveedor.",
+    instruction="Resume variaciones de costo relevantes.", tools=[costos_proveedor])
+
+# El orquestador decide a qué worker llamar (y cuántas veces) en cada pregunta
+root_agent = LlmAgent(name="orquestador", model="gemini-pro-latest",
+    instruction="Descompón la pregunta, delega en los analistas y sintetiza con evidencia.",
+    tools=[AgentTool(agent=ventas), AgentTool(agent=compras)])
+```
+
+```python title="orquestador_strands.py"
+from strands import Agent, tool
+
+@tool
+def analista_ventas(pregunta: str) -> str:
+    """Consulta ventas y márgenes por categoría en el data warehouse."""
+    worker = Agent(system_prompt="Eres analista de ventas. Responde con cifras.",
+                   tools=[consultar_dwh], callback_handler=None)  # contexto limpio
+    return str(worker(pregunta))
+
+@tool
+def analista_compras(pregunta: str) -> str:
+    """Analiza costos de compra por proveedor."""
+    worker = Agent(system_prompt="Eres analista de compras.",
+                   tools=[costos_proveedor], callback_handler=None)
+    return str(worker(pregunta))
+
+orquestador = Agent(model="global.anthropic.claude-sonnet-5-5",
+    system_prompt="Descompón la pregunta, delega en los analistas y sintetiza.",
+    tools=[analista_ventas, analista_compras])
+orquestador("¿Por qué cayó el margen de electro en Q3?")
+```
+
+</CodeTabs>
+
+En ADK, `gemini-pro-latest` como alias del orquestador es ilustrativo; usa el modelo que tengas habilitado (o `LiteLlm(model="bedrock/global.anthropic.claude-sonnet-5-5")` si tu estándar es Claude en Bedrock vía [gateway](/guia/gateways)). Las funciones `consultar_dwh` y `costos_proveedor` son tus herramientas.
+
+### Evaluator-optimizer y handoffs
+
+<CodeTabs labels={["ADK: LoopAgent", "Strands: Swarm"]}>
+
+```python title="ficha_producto_loop.py"
+from google.adk.agents import LlmAgent, LoopAgent
+from google.adk.tools import ToolContext
+
+MODEL = "gemini-flash-latest"
+
+def aprobar_ficha(tool_context: ToolContext) -> dict:
+    """Llama a esta herramienta SOLO si la ficha cumple toda la rúbrica."""
+    tool_context.actions.escalate = True        # detiene el LoopAgent
+    return {"estado": "aprobada"}
+
+redactor = LlmAgent(name="redactor", model=MODEL, output_key="ficha",
+    instruction="Redacta la ficha a partir de la hoja técnica. Si hay feedback "
+                "del evaluador en el historial, corrígelo.")
+evaluador = LlmAgent(name="evaluador", model=MODEL, tools=[aprobar_ficha],
+    instruction="Evalúa la ficha con la rúbrica: tono de marca, sin datos ausentes "
+                "en la hoja técnica, sistema métrico, máx. 120 palabras. Si cumple, "
+                "llama a aprobar_ficha; si no, lista correcciones concretas.")
+
+root_agent = LoopAgent(name="ficha_producto",
+                       sub_agents=[redactor, evaluador],
+                       max_iterations=3)         # límite duro
+```
+
+```python title="soporte_swarm.py"
+from strands import Agent
+from strands.multiagent import Swarm
+
+MODEL = "global.anthropic.claude-sonnet-5-5"
+triage = Agent(name="triage", model=MODEL,
+    system_prompt="Identifica la necesidad y transfiere al especialista.")
+facturacion = Agent(name="facturacion", model=MODEL, tools=[ver_factura],
+    system_prompt="Resuelves dudas de facturación.")
+reembolsos = Agent(name="reembolsos", model=MODEL, tools=[crear_nota_credito],
+    system_prompt="Gestionas reembolsos dentro de la política.")
+
+swarm = Swarm(
+    [triage, facturacion, reembolsos],
+    entry_point=triage,
+    max_handoffs=10,                       # evita ping-pong infinito
+    execution_timeout=600.0,
+    repetitive_handoff_detection_window=6,
+    repetitive_handoff_min_unique_agents=2,
+)
+result = swarm("Me cobraron dos veces el pedido 4512 y quiero la devolución")
+print(result.status, [n.node_id for n in result.node_history])
+```
+
+</CodeTabs>
+
+En el Swarm de Strands, cada agente recibe automáticamente la herramienta `handoff_to_agent` para transferir el control. Por defecto, la detección de handoffs repetitivos está desactivada: actívala siempre en producción.
+
+## Cómo elegir: tabla de decisión
+
+| Si tu problema… | Patrón | Latencia | Costo en tokens | Predecibilidad |
+|---|---|---|---|---|
+| Se resuelve con una buena llamada + RAG | **Una llamada** (LLM aumentado) | Mínima | 1× | Muy alta |
+| Tiene pasos fijos y verificables | **Chaining + gates** | Suma de pasos | Bajo, lineal | Alta |
+| Mezcla categorías distintas o niveles de riesgo | **Routing** | +1 llamada corta | Puede **bajar** el total | Alta |
+| Tiene partes independientes o requiere más confianza | **Paralelización** | La rama más lenta | Suma de ramas | Alta |
+| Requiere subtareas que no puedes predecir | **Orquestador-workers** | Alta, variable | Alto (multiagente ≈15×) | Media |
+| Tiene criterios claros y mejora iterando | **Evaluator-optimizer** | × iteraciones | × iteraciones | Media |
+| Es abierto y con muchos pasos impredecibles | **Agente autónomo** | Alta, variable | ≈4× un chat o más | Baja |
+| Requiere especialistas que llevan la conversación | **Handoffs** | Media | Medio | Media |
+
+<KeyPoints>
+
+- Los patrones se **componen**: un router que deriva a un chaining, un orquestador cuyos workers son evaluator-optimizers. Combina solo lo que la medición justifique.
+- **Chaining, routing y paralelización** cubren la mayoría de los casos empresariales con costo predecible.
+- La diferencia entre paralelización y orquestador-workers es **quién decide la descomposición**: tu código o el LLM.
+- Todo loop (evaluator-optimizer, agente, swarm) necesita **límites duros** de iteraciones, handoffs, costo y tiempo.
+- En ADK 2.x, el `Workflow` en grafo reemplaza a los workflow agents; en Strands, Graph, Swarm y agents-as-tools cubren el espectro.
+
+</KeyPoints>
+
+## Errores comunes
+
+<Callout type="danger" title="Multiagente por defecto">
+Empezar con cinco agentes "porque es más modular" multiplica tokens, latencia y superficie de errores. Anthropic advierte que el multiagente rinde peor cuando todos los agentes necesitan el mismo contexto o hay muchas dependencias entre ellos. Primero un agente único con buenas herramientas; divide cuando aparezcan señales concretas.
+</Callout>
+
+<Callout type="warning" title="Gates hechos con LLM">
+Si una validación se puede expresar en código (esquema, rango, existencia en un maestro), hazla en código. Un LLM como gate agrega costo, latencia y una fuente más de error no determinista.
+</Callout>
+
+<Callout type="tip" title="Mide antes de subir de nivel">
+Cada escalón (llamada → workflow → agente → multiagente) debe justificarse con una [evaluación](/guia/evaluacion-observabilidad) que muestre una mejora que compense el costo extra. Sin evals, la complejidad crece y la calidad no se sabe.
+</Callout>
+
+## Siguientes pasos
+
+<Cards cols={3}>
+  <Card title="Context engineering" href="/guia/context-engineering">Qué entra en la ventana de contexto en cada paso, memoria y caching.</Card>
+  <Card title="Orquestación avanzada" href="/guia/orquestacion-avanzada">Topologías multiagente, ejecución durable y human-in-the-loop.</Card>
+  <Card title="Google ADK" href="/guia/google-adk">Agentes, graph workflows y despliegue con ADK 2.x.</Card>
+  <Card title="AWS Strands Agents" href="/guia/strands-agents">Agents-as-tools, Swarm y Graph sobre Bedrock.</Card>
+  <Card title="LangGraph" href="/guia/langgraph">Grafos con estado, checkpointers e interrupciones.</Card>
+  <Card title="Comparativa de frameworks" href="/guia/comparativa-frameworks">Qué framework encaja con cada patrón y equipo.</Card>
+</Cards>

@@ -1,0 +1,81 @@
+import type { IsoSpec } from '../components/iso/types'
+
+export const bedrockInferencia: IsoSpec = {
+  id: 'aws-bedrock-inferencia',
+  title: 'Ruta de una inferencia en Bedrock',
+  summary:
+    'Qué ocurre entre que tu agente llama a `Converse` y recibe la respuesta: **IAM** autoriza el perfil y los modelos en las regiones destino, **Guardrails** evalúa la entrada y la salida, el **prompt cache** reutiliza el prefijo estático y el **perfil de inferencia** (`global.` / `us.` / `eu.`) elige la región con capacidad.',
+  height: 470,
+  zones: [{ id: 'destinos', label: 'Regiones destino del perfil', from: [11.4, -4.6], to: [14.2, 4.6], tone: 'model' }],
+  nodes: [
+    { id: 'app', label: 'Agente / app', sub: 'boto3 · LiteLLM · Strands', at: [0, 0], shape: 'tall', tone: 'agent', icon: 'bot', info: 'Tu código llama a `bedrock-runtime` con SigV4 (rol IAM) o con una **API key de Bedrock** (`AWS_BEARER_TOKEN_BEDROCK`). El `modelId` es el ID del perfil, p. ej. `global.anthropic.claude-sonnet-5-5`.' },
+    { id: 'iam', label: 'IAM / SCP', sub: 'perfil + modelos', at: [3.2, -3.3], shape: 'diamond', tone: 'guard', icon: 'key', info: 'La política debe permitir `bedrock:InvokeModel*` sobre el ARN del **perfil** y sobre el **foundation model en cada región destino**. Una SCP que bloquee regiones provoca `AccessDenied` intermitentes según adónde se enrute.' },
+    { id: 'endpoint', label: 'bedrock-runtime', at: [3.2, 0], shape: 'hex', tone: 'gateway', icon: 'router', info: 'Endpoint regional recomendado. Expone `InvokeModel`, `Converse` y también las APIs compatibles con OpenAI (Chat Completions, Responses) y Anthropic Messages. Guardrails y perfiles entre regiones solo funcionan aquí, no en `bedrock-mantle`.' },
+    { id: 'guard', label: 'Guardrail', sub: 'entrada y salida', at: [6.4, 0], shape: 'diamond', tone: 'guard', icon: 'shield', info: 'Con `guardrailConfig` se evalúan filtros de contenido, *prompt attack*, temas denegados, PII, *contextual grounding* y Automated Reasoning. Si interviene, `stopReason` vale `guardrail_intervened`.' },
+    { id: 'cache', label: 'Prompt cache', sub: 'cachePoint · TTL 1 h', at: [6.4, 3.3], shape: 'cylinder', tone: 'memory', icon: 'timer', info: 'El prefijo hasta el `cachePoint` (tools → system → messages) se guarda 5 min por defecto o 1 h con `"ttl": "1h"`. Hasta 4 checkpoints; mínimo 512 tokens acumulados en Claude 5.5.' },
+    { id: 'profile', label: 'Inference profile', sub: 'global.anthropic…', at: [9.6, 0], shape: 'diamond', tone: 'gateway', icon: 'split', info: 'Perfil de inferencia entre regiones definido por AWS. `global.` enruta a cualquier región comercial (≈10% más barato); `us.`, `eu.`, `apac.`, `jp.`, `au.` restringen a una geografía por residencia de datos.' },
+    { id: 'r1', label: 'Región A', sub: 'p. ej. us-east-1', at: [12.8, -3.2], shape: 'sphere', tone: 'model', icon: 'brain', info: 'Una de las regiones donde el perfil tiene capacidad. Los datos en reposo (logs, KB) siguen en tu región de origen; la inferencia puede ocurrir en otra.' },
+    { id: 'r2', label: 'Región B', sub: 'p. ej. us-west-2', at: [12.8, 0], shape: 'sphere', tone: 'model', icon: 'brain', info: 'Si la región A está saturada, el perfil enruta aquí sin que cambies código. Por eso IAM debe permitir el modelo en todas las regiones del perfil.' },
+    { id: 'r3', label: 'Región C', sub: 'p. ej. eu-west-1', at: [12.8, 3.2], shape: 'sphere', tone: 'model', icon: 'brain', info: 'Con `global.` la petición puede salir de tu geografía. Si tienes requisitos de residencia (GDPR, banca), usa un perfil geográfico como `eu.` o `us.`.' },
+  ],
+  edges: [
+    { from: 'app', to: 'endpoint' },
+    { from: 'endpoint', to: 'iam', route: 'z', dashed: true },
+    { from: 'endpoint', to: 'guard' },
+    { from: 'guard', to: 'cache', route: 'z' },
+    { from: 'guard', to: 'profile' },
+    { from: 'profile', to: 'r1', route: 'z' },
+    { from: 'profile', to: 'r2' },
+    { from: 'profile', to: 'r3', route: 'z' },
+  ],
+  steps: [
+    { title: '1 · Llamada a Converse', body: 'El agente envía `system`, `messages`, `toolConfig` y `guardrailConfig` a `bedrock-runtime` usando como `modelId` el perfil `global.anthropic.claude-sonnet-5-5`.', flows: ['app>endpoint'] },
+    { title: '2 · Autorización IAM', body: 'Bedrock comprueba `bedrock:InvokeModel` sobre el ARN del perfil **y** sobre el foundation model en las regiones destino. Es el error de configuración más común en cuentas con SCPs regionales.', flows: ['endpoint>iam'], focus: ['iam', 'endpoint'] },
+    { title: '3 · Guardrail de entrada', body: 'El guardrail evalúa el prompt: *prompt attack*, temas denegados (p. ej. asesoría legal), PII. Si bloquea, la respuesta llega sin invocar el modelo y con `stopReason = guardrail_intervened`.', flows: ['endpoint>guard'] },
+    { title: '4 · Prompt cache', body: 'Si el prefijo (tools + system con las políticas de devolución) coincide con uno cacheado, se cobra como `cacheReadInputTokens`, más barato y rápido. Con `ttl: 1h` sobrevive pausas largas del usuario.', flows: ['guard>cache', 'cache>guard'] },
+    { title: '5 · Enrutamiento entre regiones', body: 'El perfil elige la región con capacidad disponible. Tu código no cambia: solo el `modelId` decide si el alcance es global o geográfico.', flows: ['guard>profile', 'profile>r1', 'profile>r2', 'profile>r3'] },
+    { title: '6 · Guardrail de salida y respuesta', body: 'La respuesta pasa de nuevo por el guardrail (PII, *grounding*) y vuelve con `usage` desglosado: `inputTokens`, `cacheReadInputTokens`, `cacheWriteInputTokens`, `outputTokens`.', flows: ['r2>profile', 'profile>guard', 'guard>endpoint', 'endpoint>app'] },
+  ],
+}
+
+export const agentcoreArquitectura: IsoSpec = {
+  id: 'aws-agentcore-arquitectura',
+  title: 'AgentCore: una petición de punta a punta',
+  summary:
+    'Un agente en **AgentCore Runtime** no está solo: **Identity** autentica al usuario y guarda credenciales salientes, **Memory** aporta contexto, **Gateway** expone herramientas como MCP, **Policy** evalúa cada llamada con reglas Cedar y **Observability** traza todo en CloudWatch. Recorre los pasos.',
+  height: 500,
+  zones: [{ id: 'agentcore', label: 'Amazon Bedrock AgentCore', from: [1.8, -4.8], to: [11.2, 4.8], tone: 'agent' }],
+  nodes: [
+    { id: 'user', label: 'Usuario / app', sub: 'portal de soporte', at: [-1.2, 0], shape: 'person', tone: 'user', icon: 'user', info: 'Una app web de atención al cliente llama a `InvokeAgentRuntime` con un JWT de tu IdP (Cognito, Entra ID, Okta, Auth0) o con SigV4.' },
+    { id: 'identity', label: 'Identity', sub: 'OAuth', at: [3.2, 0], shape: 'hex', tone: 'guard', icon: 'key', info: 'Valida el token entrante (*inbound auth*) y actúa como bóveda de credenciales salientes (OAuth 2LO/3LO, API keys) para que el agente nunca tenga secretos en el código. Soporta On-Behalf-Of.' },
+    { id: 'runtime', label: 'Runtime', sub: 'microVM', at: [6.4, 0], shape: 'tall', tone: 'agent', icon: 'cpu', info: 'Serverless, con aislamiento por sesión en microVM y ejecuciones largas. Corre tu código (ADK, Strands, LangGraph, CrewAI…) como CodeZip o contenedor y sirve HTTP, MCP, A2A o AG-UI.' },
+    { id: 'model', label: 'Bedrock', sub: 'global.anthropic…5-5', at: [6.4, -3.4], shape: 'sphere', tone: 'model', icon: 'brain', info: 'El modelo es independiente de AgentCore: puede ser Claude en Bedrock vía perfil de inferencia, Gemini, OpenAI o un gateway propio como LiteLLM.' },
+    { id: 'memory', label: 'Memory', sub: 'corto y largo plazo', at: [6.4, 3.3], shape: 'cylinder', tone: 'memory', icon: 'database', info: 'Memoria de corto plazo (eventos de la sesión) y de largo plazo (hechos, preferencias, resúmenes extraídos por estrategias). Compartible entre agentes y con TTL configurable.' },
+    { id: 'obs', label: 'Observability', sub: 'OTel → CloudWatch', at: [3.2, 3.3], shape: 'box', tone: 'infra', icon: 'chart', info: 'Trazas OpenTelemetry de cada paso (modelo, herramientas, memoria) en CloudWatch, con vistas de trayectoria. Alimenta **Evaluations** online y on-demand.' },
+    { id: 'gateway', label: 'Gateway', sub: 'tools MCP', at: [9.8, 0], shape: 'hex', tone: 'protocol', icon: 'plug', info: 'Convierte APIs OpenAPI, Lambda, Step Functions, servidores MCP y destinos HTTP en un único endpoint MCP con autenticación unificada. También acepta *inference targets* con fallback de modelo.' },
+    { id: 'policy', label: 'Policy', sub: 'Cedar · Guardrails', at: [9.8, -3.4], shape: 'diamond', tone: 'guard', icon: 'shield', info: 'Reglas deterministas evaluadas en el Gateway **fuera del código del agente**: el modelo no puede "razonar" para saltárselas. Se escriben en Cedar o lenguaje natural e integran Bedrock Guardrails.' },
+    { id: 'lambda', label: 'API de pedidos', sub: 'Lambda / OpenAPI', at: [13.4, 0], shape: 'box', tone: 'tool', icon: 'server', info: 'Sistema interno expuesto como herramienta MCP (`get_order`, `issue_refund`). El Gateway traduce la llamada MCP a la invocación Lambda o HTTP.' },
+    { id: 'saas', label: 'CRM SaaS', sub: 'OAuth 3LO', at: [13.4, 3.3], shape: 'cloud', tone: 'tool', icon: 'cloud', info: 'Herramienta externa (p. ej. Salesforce o Zendesk) a la que el Gateway llega con el token OAuth del usuario que Identity custodia.' },
+  ],
+  edges: [
+    { from: 'user', to: 'identity' },
+    { from: 'identity', to: 'runtime' },
+    { from: 'runtime', to: 'model' },
+    { from: 'runtime', to: 'memory' },
+    { from: 'runtime', to: 'obs', route: 'z', dashed: true },
+    { from: 'runtime', to: 'gateway', label: 'MCP' },
+    { from: 'gateway', to: 'policy' },
+    { from: 'gateway', to: 'lambda' },
+    { from: 'gateway', to: 'saas', route: 'z' },
+  ],
+  steps: [
+    { title: '1 · Invocación autenticada', body: 'El portal llama a `InvokeAgentRuntime` con el JWT del cliente y un `runtimeSessionId`. **Identity** valida el token contra el IdP configurado antes de que tu código se ejecute.', flows: ['user>identity', 'identity>runtime'] },
+    { title: '2 · Sesión aislada', body: 'Runtime enruta la petición a la **microVM de esa sesión** (o crea una). Tu entrypoint (`@app.entrypoint`) recibe el payload en `POST /invocations` del puerto 8080.', focus: ['runtime'] },
+    { title: '3 · Contexto desde Memory', body: 'El agente recupera los últimos eventos de la sesión y los recuerdos de largo plazo del cliente ("prefiere reembolso en tienda", "pedido previo con incidencia").', flows: ['memory>runtime'] },
+    { title: '4 · Razonamiento', body: 'El framework llama al modelo (Claude en Bedrock vía perfil `global.`) con contexto y herramientas. El modelo pide `issue_refund(order_id="4512", amount=89.9)`.', flows: ['runtime>model', 'model>runtime'] },
+    { title: '5 · Gateway + Policy', body: 'La llamada MCP llega al **Gateway**. **Policy** evalúa la regla Cedar: reembolsos > 100 USD requieren rol supervisor. Este pasa; uno mayor se rechazaría de forma determinista.', flows: ['runtime>gateway', 'gateway>policy', 'policy>gateway'] },
+    { title: '6 · Ejecución de herramientas', body: 'El Gateway invoca la Lambda de pedidos y, para registrar el caso, el CRM SaaS con el token OAuth que **Identity** guardó para ese usuario.', flows: ['gateway>lambda', 'gateway>saas'] },
+    { title: '7 · Memoria y trazas', body: 'El agente escribe el evento en Memory (las estrategias extraerán hechos de largo plazo de forma asíncrona) y cada span queda en CloudWatch para Evaluations.', flows: ['runtime>memory', 'runtime>obs'] },
+    { title: '8 · Respuesta', body: 'Runtime devuelve la respuesta (o un stream SSE) al portal. La microVM sigue viva para la sesión hasta su timeout de inactividad.', flows: ['runtime>identity', 'identity>user'] },
+  ],
+}

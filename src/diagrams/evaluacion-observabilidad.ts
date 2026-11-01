@@ -1,0 +1,86 @@
+import type { IsoSpec } from '../components/iso/types'
+
+export const evalCiclo: IsoSpec = {
+  id: 'evaluacion-ciclo',
+  title: 'Ciclo de vida de las evaluaciones',
+  summary:
+    'Las evals de un agente son un **ciclo**, no un paso previo al lanzamiento: un dataset de tareas alimenta un *harness* que ejecuta varios *trials* contra el agente, los *graders* puntúan cada resultado, un *gate* en CI/CD decide si se despliega, y en producción el muestreo de trazas y el feedback generan **nuevos casos** que vuelven al dataset.',
+  height: 500,
+  zones: [
+    { id: 'offline', label: 'Offline (CI/CD)', from: [-1.4, -5.6], to: [11.8, 1.4], tone: 'infra' },
+    { id: 'online', label: 'Online (producción)', from: [1.9, 2.1], to: [11.8, 4.9], tone: 'agent' },
+  ],
+  nodes: [
+    { id: 'dataset', label: 'Dataset de tareas', sub: '20–50 casos reales', at: [0, 0], shape: 'stack', tone: 'data', icon: 'list', info: 'Cada **tarea** tiene entrada, contexto (estado inicial, usuario simulado) y criterios de éxito. Se empieza con 20–50 tareas sacadas de fallos reales: tickets de soporte, bugs, revisiones manuales previas al lanzamiento.' },
+    { id: 'harness', label: 'Harness de evals', sub: 'ejecuta N trials', at: [3.3, 0], shape: 'tall', tone: 'infra', icon: 'workflow', info: 'Infraestructura que corre las tareas de punta a punta: prepara el entorno, ejecuta varios **trials** por tarea (las salidas varían entre corridas), registra el **transcript** completo y agrega resultados.' },
+    { id: 'agent', label: 'Agente bajo prueba', sub: 'modelo + harness', at: [3.3, -3.4], shape: 'tall', tone: 'agent', icon: 'bot', info: 'Se evalúa el **sistema completo**: modelo, prompt, herramientas y el código del loop. Cambiar cualquiera de ellos (incluso la descripción de una tool) exige volver a correr la suite.' },
+    { id: 'graders', label: 'Graders', sub: 'código · LLM · humano', at: [6.6, 0], shape: 'diamond', tone: 'guard', icon: 'check', info: 'Puntúan cada trial. **Código**: comprobaciones deterministas del resultado (¿existe el reembolso en la BD?). **LLM-as-judge**: rúbricas para lo subjetivo, calibrado con humanos. **Humanos**: el estándar de oro, caro y lento.' },
+    { id: 'judge', label: 'Modelo juez', sub: 'rúbrica calibrada', at: [6.6, -3.4], shape: 'sphere', tone: 'model', icon: 'brain', info: 'Un LLM (idealmente distinto del agente) que aplica una rúbrica explícita y devuelve puntaje + justificación en JSON. Su acuerdo con evaluadores humanos se mide periódicamente.' },
+    { id: 'report', label: 'Reporte', sub: 'pass@k · pass^k · costo', at: [10.4, -4.2], shape: 'doc', tone: 'neutral', icon: 'chart', info: 'Tasa de éxito por suite, **pass@k** y **pass^k**, latencia, tokens y costo por tarea. Comparado contra la versión en producción, no contra un número absoluto.' },
+    { id: 'gate', label: 'Gate de CI/CD', sub: '¿regresión?', at: [9.9, 0], shape: 'diamond', tone: 'guard', icon: 'flag', info: 'La suite de **regresión** (≈100% esperado) bloquea el merge o el despliegue si baja. La suite de **capacidad** se reporta pero no bloquea: mide hacia dónde mejorar.' },
+    { id: 'prod', label: 'Producción', sub: 'trazas OTel', at: [9.9, 3.4], shape: 'cloud', tone: 'infra', icon: 'cloud', info: 'El agente desplegado emite trazas de cada paso. Es la fuente de verdad sobre cómo se usa realmente el agente.' },
+    { id: 'online', label: 'Evals online', sub: 'muestreo + feedback', at: [6.6, 3.4], shape: 'box', tone: 'infra', icon: 'eye', info: 'Se evalúa una **muestra** de trazas reales con graders automáticos (p. ej. AgentCore Evaluations online, Langfuse, Phoenix) y se cruza con el feedback de usuarios (pulgar arriba/abajo, escalamientos).' },
+    { id: 'triage', label: 'Revisión humana', sub: 'leer transcripts', at: [3.3, 3.4], shape: 'person', tone: 'user', icon: 'search', info: 'Alguien del equipo **lee transcripts** de los casos marcados: ¿falló el agente o falló el grader? Los fallos confirmados se convierten en tareas nuevas del dataset.' },
+  ],
+  edges: [
+    { from: 'dataset', to: 'harness' },
+    { from: 'harness', to: 'agent', label: 'trials' },
+    { from: 'harness', to: 'graders', label: 'transcripts' },
+    { from: 'graders', to: 'judge', dashed: true },
+    { from: 'graders', to: 'gate' },
+    { from: 'gate', to: 'report', dashed: true },
+    { from: 'gate', to: 'prod', label: 'deploy' },
+    { from: 'prod', to: 'online' },
+    { from: 'online', to: 'triage' },
+    { from: 'triage', to: 'dataset', label: 'casos nuevos', route: 'z' },
+  ],
+  steps: [
+    { title: '1 · Dataset desde fallos reales', body: 'El punto de partida son 20–50 **tareas** con criterios de éxito verificables, extraídas de tickets, bugs y pruebas manuales. Incluye casos donde el agente **debe** actuar y casos donde **no** debe hacerlo.', focus: ['dataset'] },
+    { title: '2 · El harness ejecuta trials', body: 'Por cada tarea, el harness prepara un entorno limpio y corre **varios trials** contra el agente. Guarda el transcript completo: mensajes, tool calls, resultados intermedios y estado final.', flows: ['dataset>harness', 'harness>agent', 'agent>harness'] },
+    { title: '3 · Graders puntúan el resultado', body: 'Primero graders de **código** sobre el *outcome* (¿quedó creado el ticket con la prioridad correcta?). Para lo subjetivo, un **LLM juez** con rúbrica. Se evalúa el resultado, no el camino exacto.', flows: ['harness>graders', 'graders>judge', 'judge>graders'] },
+    { title: '4 · Gate de regresión en CI', body: 'Si la suite de regresión baja respecto de la versión actual, el pipeline **bloquea** el despliegue. El reporte muestra pass@k, pass^k, costo y latencia por tarea.', flows: ['graders>gate', 'gate>report'] },
+    { title: '5 · Despliegue y trazas', body: 'Si pasa el gate, la nueva versión llega a producción (idealmente con despliegue gradual). Cada sesión emite trazas OpenTelemetry con spans por llamada al modelo y por herramienta.', flows: ['gate>prod'] },
+    { title: '6 · Evals online', body: 'Un porcentaje de las trazas se evalúa automáticamente (relevancia, uso correcto de tools, seguridad) y se combina con el **feedback** explícito de los usuarios para detectar degradaciones que el dataset no cubría.', flows: ['prod>online'] },
+    { title: '7 · Cerrar el ciclo', body: 'Las trazas marcadas se **leen**. Los fallos reales del agente se convierten en tareas nuevas; las capacidades que ya pasan siempre se "gradúan" a la suite de regresión.', flows: ['online>triage', 'triage>dataset'] },
+  ],
+}
+
+export const evalTrazas: IsoSpec = {
+  id: 'evaluacion-trazas',
+  title: 'Pipeline de trazas de un agente',
+  summary:
+    'Cada invocación del agente genera una **traza** con spans anidados: `invoke_agent` → `chat` (llamada al modelo, con tokens) → `execute_tool`. El contexto de traza viaja a los servidores MCP en `_meta.traceparent`. Un **OpenTelemetry Collector** recibe todo por OTLP, filtra y reparte a los backends de observabilidad y evaluación.',
+  height: 480,
+  zones: [{ id: 'app', label: 'Proceso del agente', from: [-1.5, -4.9], to: [1.5, 4.9], tone: 'agent' }],
+  nodes: [
+    { id: 'user', label: 'Usuario', sub: 'session_id', at: [-3.6, 0], shape: 'person', tone: 'user', icon: 'user', info: 'La petición llega con identificadores de sesión y usuario que se propagan como atributos (`gen_ai.conversation.id`) para poder agrupar trazas por conversación.' },
+    { id: 'agent', label: 'invoke_agent', sub: 'span raíz del agente', at: [0, 0], shape: 'tall', tone: 'agent', icon: 'bot', info: 'Span de agente según las convenciones GenAI de OpenTelemetry (estado *Development*). Nombre sugerido `invoke_agent {gen_ai.agent.name}`. Agrupa todo el trabajo de un turno.' },
+    { id: 'model', label: 'chat', sub: 'span por llamada LLM', at: [0, -3.4], shape: 'sphere', tone: 'model', icon: 'brain', info: 'Un span por llamada al modelo con `gen_ai.provider.name` (p. ej. `aws.bedrock`), `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens` y latencia. De aquí sale el costo.' },
+    { id: 'tool', label: 'execute_tool', sub: 'servidor MCP', at: [0, 3.4], shape: 'box', tone: 'tool', icon: 'wrench', info: 'Span `execute_tool {gen_ai.tool.name}` con `gen_ai.tool.call.id`. Desde MCP `2026-07-28` el `traceparent` viaja en `_meta`, así que los spans del servidor MCP quedan como hijos de esta llamada.' },
+    { id: 'collector', label: 'OTel Collector', sub: 'OTLP · filtros', at: [3.6, 0], shape: 'hex', tone: 'gateway', icon: 'filter', info: 'Recibe OTLP, agrega atributos de entorno, **redacta PII** de prompts y respuestas, aplica muestreo (*tail sampling*: guardar 100% de errores) y exporta a uno o varios backends.' },
+    { id: 'cw', label: 'CloudWatch', sub: 'AgentCore Observability', at: [7.2, -3.4], shape: 'cloud', tone: 'infra', icon: 'chart', info: 'AgentCore emite telemetría compatible con OTEL hacia CloudWatch: dashboards de sesiones, latencia, tokens y errores, con visualización de trazas para agentes en Runtime.' },
+    { id: 'lf', label: 'Langfuse / Phoenix', sub: 'trazas LLM + evals', at: [7.2, 0], shape: 'box', tone: 'infra', icon: 'layers', info: 'Backends especializados en LLM: vista de conversación, costos por usuario, datasets y evaluadores sobre trazas. Langfuse es MIT y autoalojable; Phoenix usa OpenInference.' },
+    { id: 'evals', label: 'Evals online', sub: 'muestra de trazas', at: [7.2, 3.4], shape: 'diamond', tone: 'guard', icon: 'check', info: 'Graders automáticos que puntúan una muestra de trazas de producción (p. ej. AgentCore Evaluations en modo online). Sus puntajes vuelven como métricas.' },
+    { id: 'alerts', label: 'Dashboards y alertas', sub: 'SLO · costo · calidad', at: [10.8, 0], shape: 'box', tone: 'neutral', icon: 'gauge', info: 'Alertas sobre p95 de latencia, tasa de error de tools, costo diario por agente/equipo, caída del puntaje de evals online y bucles (turnos por sesión anómalos).' },
+  ],
+  edges: [
+    { from: 'user', to: 'agent' },
+    { from: 'agent', to: 'model' },
+    { from: 'agent', to: 'tool', label: 'traceparent' },
+    { from: 'agent', to: 'collector', label: 'OTLP' },
+    { from: 'collector', to: 'cw' },
+    { from: 'collector', to: 'lf' },
+    { from: 'collector', to: 'evals' },
+    { from: 'cw', to: 'alerts', route: 'x' },
+    { from: 'evals', to: 'alerts', route: 'x' },
+    { from: 'lf', to: 'alerts' },
+  ],
+  steps: [
+    { title: '1 · Se abre la traza', body: 'Llega la petición y el agente abre el span raíz `invoke_agent`, con atributos de sesión, usuario y versión del agente.', flows: ['user>agent'] },
+    { title: '2 · Span por llamada al modelo', body: 'Cada llamada al LLM genera un span `chat` con modelo, tokens de entrada/salida (incluidos los de caché) y latencia. Es la base para calcular **costo por sesión**.', flows: ['agent>model', 'model>agent'] },
+    { title: '3 · Span por herramienta y propagación', body: 'Cada tool call genera `execute_tool`. Si la herramienta es un servidor MCP, el `traceparent` viaja en `_meta`: el trabajo del servidor queda **en la misma traza**.', flows: ['agent>tool', 'tool>agent'] },
+    { title: '4 · Exportación al Collector', body: 'El SDK exporta por OTLP a un Collector, que redacta datos sensibles y aplica muestreo: 100% de errores y sesiones lentas, un porcentaje del resto.', flows: ['agent>collector'] },
+    { title: '5 · Reparto a backends', body: 'El mismo flujo alimenta CloudWatch (operación), Langfuse/Phoenix (depuración de prompts y conversaciones) y los evaluadores online. Instrumentar con un estándar evita amarrarse a un proveedor.', flows: ['collector>cw', 'collector>lf', 'collector>evals'] },
+    { title: '6 · Alertas', body: 'Latencia, errores, costo y calidad se consolidan en dashboards con alertas. Una caída del puntaje online es tan importante como un pico de errores 5xx.', flows: ['cw>alerts', 'lf>alerts', 'evals>alerts'] },
+  ],
+}

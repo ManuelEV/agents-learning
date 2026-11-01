@@ -1,0 +1,313 @@
+**Strands Agents** es el SDK open source (Apache 2.0) de AWS para construir agentes con un enfoque **model-driven**: en vez de dibujar un flujo de pasos, defines un modelo, un prompt y un conjunto de herramientas, y dejas que el modelo planifique, elija herramientas y decida cuándo terminar. Nació como el framework interno detrás de varios productos de AWS (Amazon Q Developer, AWS Glue, VPC Reachability Analyzer) y hoy es la opción "nativa" para agentes sobre Amazon Bedrock y AgentCore, aunque soporta muchos otros proveedores de modelos.
+
+## Estado del proyecto (octubre de 2026)
+
+| | Python | TypeScript |
+|---|---|---|
+| Paquete | `pip install strands-agents` | `npm install @strands-agents/sdk` |
+| Versión | **1.63.0** (30-10-2026) | **1.23.0** |
+| Herramientas comunitarias | `strands-agents-tools` (`http_request`, `file_read`, `use_aws`…) | Subconjunto |
+| Licencia | Apache 2.0 | Apache 2.0 |
+
+El ritmo de releases es alto (casi semanal), así que fija versiones en tus lockfiles. La novedad más visible de 2026 es **Strands Harness** (septiembre de 2026): un agente preconfigurado de propósito general, con truncado y compactación de contexto incluidos, en la línea de la nueva categoría de *harnesses* que también impulsan Microsoft, Pydantic y Vercel.
+
+## La filosofía model-driven
+
+Los frameworks de primera generación pedían que el desarrollador codificara el razonamiento: cadenas de prompts, parsers de salida, grafos de pasos. Strands parte de una observación distinta: los modelos actuales **ya saben planificar y usar herramientas** gracias al entrenamiento en tool use. El trabajo del framework es darles buenas herramientas, un loop robusto y límites, no reemplazar su razonamiento.
+
+<Cards cols={3}>
+  <Card title="Modelo" tag="razona">
+    Bedrock por defecto (Claude con perfiles de inferencia), más proveedores como Anthropic, OpenAI, Gemini, Ollama, LiteLLM o llama.cpp.
+  </Card>
+  <Card title="Herramientas" tag="actúa">
+    Funciones con `@tool`, herramientas comunitarias, servidores MCP (`MCPClient`) y otros agentes envueltos como herramienta.
+  </Card>
+  <Card title="Prompt" tag="guía">
+    Un `system_prompt` que define rol, reglas y criterio para elegir herramientas. Es la principal palanca de control.
+  </Card>
+</Cards>
+
+La consecuencia práctica es que un agente Strands útil cabe en 15 líneas. La contracara: cuando necesitas un flujo **estrictamente determinista** (pasos obligatorios, aprobaciones, reintentos por paso), conviene usar los patrones `Graph`/`Workflow` del propio Strands o un framework orientado a grafos como [LangGraph](/guia/langgraph).
+
+## Primer agente: Agent, @tool y MCP
+
+```python title="soporte_agent.py"
+from strands import Agent, tool
+from strands.tools.mcp import MCPClient
+from mcp import stdio_client, StdioServerParameters
+
+@tool
+def get_order_status(order_id: str) -> dict:
+    """Consulta el estado logístico de un pedido en el ERP.
+
+    Args:
+        order_id: Identificador del pedido, por ejemplo "4512".
+    """
+    return {"order_id": order_id, "status": "retrasado", "eta": "2026-11-04"}
+
+# Servidor MCP local (stdio). Strands gestiona el ciclo de vida de la conexión.
+aws_docs = MCPClient(lambda: stdio_client(StdioServerParameters(
+    command="uvx", args=["awslabs.aws-documentation-mcp-server@latest"])))
+
+agent = Agent(
+    model="global.anthropic.claude-sonnet-5-5",   # string = model_id de Bedrock (perfil de inferencia)
+    system_prompt="Eres el agente de soporte de una tienda online. Usa herramientas; no inventes datos.",
+    tools=[get_order_status, aws_docs],           # el MCPClient se pasa directo en tools
+)
+
+result = agent("¿Por qué no ha llegado mi pedido 4512?")
+print(result)                                     # AgentResult: texto, métricas, stop_reason
+```
+
+Algunos detalles que importan:
+
+- **`@tool`** usa la firma y el docstring (incluida la sección `Args`) para generar el esquema que ve el modelo, igual que ADK.
+- **`MCPClient` directo en `tools`**: en versiones antiguas había que abrir el cliente con un bloque `with`; hoy Strands lo administra si lo pasas a `tools`.
+- **Llamar al agente** (`agent("...")`) ejecuta el loop completo de forma síncrona; también existen `invoke_async` y `stream_async` para streaming de eventos.
+- El agente **conserva el historial** entre llamadas en `agent.messages`: es *stateful* por defecto.
+
+### Proveedores de modelos
+
+El string en `model=` es un atajo para `BedrockModel`. Para controlar región, temperatura o usar otro proveedor, instancia el modelo explícitamente:
+
+<CodeTabs labels={["Bedrock explícito", "Vía proxy LiteLLM"]}>
+
+```python title="modelo_bedrock.py"
+from strands import Agent
+from strands.models import BedrockModel
+
+model = BedrockModel(
+    model_id="global.anthropic.claude-sonnet-5-5",
+    region_name="us-east-1",
+    temperature=0.2,
+)
+agent = Agent(model=model, system_prompt="Eres un analista financiero conciso.")
+```
+
+```python title="modelo_gateway.py"
+# pip install "strands-agents[litellm]" "litellm>=1.84"
+from strands import Agent
+from strands.models.litellm import LiteLLMModel
+
+# El agente habla con el AI gateway corporativo; las credenciales de Bedrock viven en el proxy
+model = LiteLLMModel(
+    client_args={"api_key": "sk-<virtual-key>", "api_base": "https://ai-gateway.interno"},
+    model_id="litellm_proxy/claude-sonnet",
+)
+agent = Agent(model=model)
+```
+
+</CodeTabs>
+
+La firma exacta de `LiteLLMModel` (en particular `client_args`) no la verificamos contra la versión 1.63; revísala en la documentación de proveedores. El patrón de usar un AI gateway entre el agente y Bedrock se explica en [gateways](/guia/gateways).
+
+### Sesiones, contexto y hooks
+
+- **Conversation managers**: controlan cuánto historial se envía al modelo. `SlidingWindowConversationManager` descarta lo más antiguo; `SummarizingConversationManager` resume en vez de borrar. Clave para conversaciones largas (ver [context engineering](/guia/context-engineering)).
+- **Session managers**: persisten el estado del agente entre invocaciones. `FileSessionManager` (local) y `S3SessionManager(session_id=..., bucket=..., prefix=...)` (desde `strands.session`), además de la integración con AgentCore Memory. La documentación actual sugiere `SnapshotSessionManager` para sesiones nuevas de un solo agente.
+- **Hooks**: eventos tipados del ciclo de vida (antes/después de invocar, de llamar al modelo o de ejecutar una herramienta) para aplicar políticas, auditoría o métricas sin tocar la lógica del agente. Cumplen el rol de los callbacks de [ADK](/guia/google-adk).
+
+## Multiagente en Strands
+
+Strands ofrece cinco patrones. La diferencia central es **quién decide el siguiente paso**: un orquestador LLM, los propios agentes o tu código.
+
+| Patrón | Quién decide | Estructura | Cuándo usarlo |
+|---|---|---|---|
+| **Agents as Tools** | El LLM del orquestador | Jerárquica | Especialistas claros con un coordinador; el más simple |
+| **Swarm** | Los agentes entre sí (`handoff_to_agent`) | Red colaborativa | Tareas exploratorias donde el siguiente experto depende de lo encontrado |
+| **Graph** | Tu código (aristas y condiciones) | DAG o ciclos | Procesos con orden y ramas definidas, feedback loops |
+| **Workflow** | Tu código (dependencias de tareas) | Pipeline | Pasos repetibles; existe una herramienta `workflow` integrada |
+| **A2A** | Protocolo entre servicios | Distribuida | Agentes de otros equipos, lenguajes o proveedores |
+
+<Diagram ids={["strands-agents-as-tools", "strands-swarm"]} />
+
+### Agents as Tools
+
+```python title="orquestador.py"
+from strands import Agent, tool
+from strands_tools import http_request
+
+@tool
+def research_assistant(query: str) -> str:
+    """Investiga preguntas factuales en fuentes web y devuelve un resumen con enlaces."""
+    research_agent = Agent(
+        model="global.anthropic.claude-haiku-5-5",   # especialista barato
+        system_prompt="Eres un investigador. Cita siempre tus fuentes.",
+        tools=[http_request],
+        callback_handler=None,                         # sin imprimir el streaming interno
+    )
+    return str(research_agent(query))
+
+@tool
+def report_writer(findings: str) -> str:
+    """Convierte hallazgos en un resumen ejecutivo de máximo 200 palabras."""
+    return str(Agent(system_prompt="Redactas para gerencia, en español neutro.", callback_handler=None)(findings))
+
+orchestrator = Agent(
+    model="global.anthropic.claude-sonnet-5-5",
+    system_prompt="Deriva cada parte de la tarea al especialista adecuado y compón la respuesta final.",
+    tools=[research_assistant, report_writer],
+)
+orchestrator("¿Qué factores externos explican la caída de ventas de electrónica en Chile en septiembre?")
+```
+
+### Swarm
+
+```python title="swarm_incidentes.py"
+from strands import Agent
+from strands.multiagent import Swarm
+
+triage = Agent(name="triage", system_prompt="Clasificas incidentes y los entregas al especialista correcto.")
+logs = Agent(name="logs", system_prompt="Analizas logs y métricas para encontrar la causa raíz.")
+deploy = Agent(name="deploy", system_prompt="Revisas despliegues recientes y propones rollback si aplica.")
+comms = Agent(name="comms", system_prompt="Redactas la actualización para la status page.")
+
+swarm = Swarm(
+    [triage, logs, deploy, comms],
+    entry_point=triage,
+    max_handoffs=20,
+    max_iterations=20,
+    execution_timeout=900.0,                 # 15 minutos en total
+    node_timeout=300.0,                      # 5 minutos por agente
+    repetitive_handoff_detection_window=8,   # corta el ping-pong entre agentes
+    repetitive_handoff_min_unique_agents=3,
+)
+result = swarm("El checkout devuelve 502 desde el despliegue de las 10:00")
+print(result.status, [n.node_id for n in result.node_history])
+```
+
+Cada agente recibe automáticamente la herramienta `handoff_to_agent` y ve la tarea original, la lista de agentes que ya intervinieron y el conocimiento compartido.
+
+### Graph, Workflow y A2A
+
+Con `GraphBuilder` defines nodos (agentes, o incluso un `Swarm` completo como un nodo) y aristas, opcionalmente **condicionales**:
+
+```python title="grafo_credito.py"
+from strands import Agent
+from strands.multiagent import GraphBuilder
+
+def solo_si_aprobado(state) -> bool:
+    """Condición de arista: continúa solo si el análisis de riesgo aprobó."""
+    risk = state.results.get("riesgo")
+    return risk is not None and "APROBADO" in str(risk.result)
+
+builder = GraphBuilder()
+builder.add_node(Agent(system_prompt="Extraes datos de la solicitud de crédito."), "extraccion")
+builder.add_node(Agent(system_prompt="Evalúas riesgo. Responde APROBADO o RECHAZADO con motivo."), "riesgo")
+builder.add_node(Agent(system_prompt="Redactas la oferta comercial."), "oferta")
+builder.add_edge("extraccion", "riesgo")
+builder.add_edge("riesgo", "oferta", condition=solo_si_aprobado)
+builder.set_entry_point("extraccion")
+graph = builder.build()
+result = graph("Solicitud de crédito pyme: Panadería Las Rosas, ventas anuales 180M CLP")
+```
+
+La forma del objeto `state` que recibe la condición la inferimos de los ejemplos; revisa la documentación de Graph antes de depender de ella. El patrón **Workflow** está documentado como encadenamiento de agentes en código o mediante la herramienta integrada `workflow` (gestión de tareas con dependencias).
+
+Para **A2A** (`pip install 'strands-agents[a2a]'`), `A2AServer(agent_factory=create_agent).serve()` expone un agente (con su Agent Card en `/.well-known/agent-card.json`) y `A2AAgent(endpoint="http://...")` consume uno remoto como si fuera un agente local. Así un agente Strands puede colaborar con uno hecho en [ADK](/guia/google-adk) o Microsoft Agent Framework. Ver [A2A](/guia/a2a).
+
+<Callout type="warning" title="El multiagente cuesta">
+Según Anthropic, un agente consume del orden de 4× los tokens de un chat y un sistema multiagente unas 15×. Empieza con un agente único bien equipado y pasa a Agents as Tools solo cuando la medición muestre que el contexto o la especialización lo justifican. Swarm es el patrón menos predecible: úsalo con límites estrictos y buena trazabilidad.
+</Callout>
+
+## Strands Harness
+
+**Strands Harness** (septiembre de 2026) es un agente de propósito general ya configurado: trae gestión de contexto con truncado y compactación, herramientas base y comportamiento ajustado para tareas largas, en lugar de que armes todo desde `Agent`. Según el blog de lanzamiento, consume **entre 28 % y 34 % menos tokens** que otros harnesses populares en sus benchmarks, con resultados similares.
+
+Cuándo considerarlo: asistentes internos de propósito amplio (operaciones, análisis, tareas de ingeniería) donde quieres un buen punto de partida y luego agregar tus herramientas y MCP. Para agentes de dominio acotado (soporte de pedidos, conciliación), un `Agent` explícito sigue siendo más fácil de razonar y evaluar.
+
+<Callout type="info" title="No verificado en detalle">
+No pudimos confirmar en la documentación oficial la API exacta de Strands Harness (nombre del módulo, parámetros) ni los números del benchmark más allá del anuncio. Trátalo como una opción a evaluar, no como dato de diseño.
+</Callout>
+
+## Despliegue en Bedrock AgentCore Runtime
+
+Strands corre donde corra Python (Lambda, Fargate, EKS, EC2), pero el camino recomendado en AWS es **AgentCore Runtime**: serverless, aislamiento por sesión en microVM, ejecuciones largas y servicios de Memory, Gateway, Identity y Observability alrededor.
+
+<Diagram id="strands-agentcore" />
+
+El código de integración es mínimo: envuelves tu agente con `BedrockAgentCoreApp` y marcas la función de entrada con `@app.entrypoint`.
+
+```python title="main.py"
+from bedrock_agentcore.runtime import BedrockAgentCoreApp
+from strands import Agent
+from soporte_agent import get_order_status
+
+app = BedrockAgentCoreApp()
+agent = Agent(
+    model="global.anthropic.claude-sonnet-5-5",
+    system_prompt="Eres el agente de soporte de una tienda online.",
+    tools=[get_order_status],
+)
+
+@app.entrypoint
+def invoke(payload):
+    """Contrato de AgentCore: HTTP 8080, POST /invocations con un JSON arbitrario."""
+    result = agent(payload.get("prompt", ""))
+    return {"result": str(result)}
+
+if __name__ == "__main__":
+    app.run()   # local: mismo contrato que en la nube
+```
+
+<Steps>
+
+1. **`agentcore create`**: genera el proyecto (código, dependencias, configuración del runtime).
+2. **`agentcore dev`**: ejecuta el agente localmente con el contrato `/invocations` para probarlo.
+3. **`agentcore deploy`**: empaqueta (CodeZip o contenedor), crea el runtime y el rol de ejecución.
+4. **`agentcore invoke`**: envía un payload de prueba al agente desplegado.
+
+</Steps>
+
+La CLI v1.0 (`@aws/agentcore`) es de octubre de 2026; los tutoriales anteriores usan el *starter toolkit* en Python con comandos `agentcore configure`/`launch`, que conviene no mezclar. El rol de ejecución necesita `bedrock:InvokeModel` y `bedrock:InvokeModelWithResponseStream` sobre el perfil de inferencia y los modelos destino. Todos los detalles de la plataforma están en [AWS Bedrock y AgentCore](/guia/aws-bedrock-agentcore).
+
+## Observabilidad con OpenTelemetry
+
+Strands instrumenta de forma nativa el ciclo del agente con **OpenTelemetry**: spans por invocación, por ciclo del loop, por llamada al modelo (tokens, latencia) y por herramienta. En AgentCore las trazas llegan a CloudWatch; fuera de AWS puedes enviarlas a Langfuse, Arize Phoenix o cualquier collector OTLP.
+
+```python title="telemetria.py"
+import os
+from strands import Agent
+from strands.telemetry import StrandsTelemetry
+
+os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://localhost:4318"   # collector OTLP (Langfuse, Jaeger…)
+telemetry = StrandsTelemetry()
+telemetry.setup_otlp_exporter()      # envía spans al collector
+# telemetry.setup_console_exporter() # útil en desarrollo
+
+agent = Agent(
+    model="global.anthropic.claude-sonnet-5-5",
+    trace_attributes={"session.id": "sess-4512", "user.id": "cliente-881", "app": "soporte"},
+)
+```
+
+Los atributos personalizados (`trace_attributes`) permiten filtrar trazas por cliente, tenant o caso de negocio. Combina esto con evaluaciones: AgentCore Evaluations (GA en marzo de 2026) puede puntuar trazas de producción. Ver [evaluación y observabilidad](/guia/evaluacion-observabilidad).
+
+## Cuándo elegir Strands
+
+| Situación | Strands encaja | Considera otra opción |
+|---|---|---|
+| Stack AWS, modelos en Bedrock, despliegue en AgentCore | Muy bien: camino nativo y documentado | — |
+| Equipo pequeño que quiere producir rápido | Muy bien: poco código, buenos defaults | — |
+| Flujos estrictos con aprobaciones y durabilidad por paso | Posible con Graph + hooks | [LangGraph](/guia/langgraph) o grafos de [ADK 2.0](/guia/google-adk) |
+| Ecosistema Google Cloud, Gemini, Agent Runtime | Funciona, pero no es su terreno | [Google ADK](/guia/google-adk) |
+| Stack .NET / Azure | Solo Python y TypeScript | [Microsoft Agent Framework](/guia/otros-frameworks) |
+
+<KeyPoints>
+
+- Strands es **model-driven**: modelo + prompt + herramientas; el modelo planifica. Poco código y buenos defaults.
+- Python 1.63 y TypeScript 1.23 a octubre de 2026; Bedrock por defecto, pero multimodelo (incluido LiteLLM hacia un gateway).
+- `MCPClient` va directo en `tools`; los agentes son *stateful* y la persistencia se delega a session managers.
+- Cinco patrones multiagente: **Agents as Tools**, **Swarm**, **Graph**, **Workflow** y **A2A**. Empieza por el más simple.
+- El camino a producción en AWS es **AgentCore Runtime** con `BedrockAgentCoreApp` + `@app.entrypoint` y la CLI `agentcore`.
+- Observabilidad OTel nativa con `StrandsTelemetry` y `trace_attributes`.
+
+</KeyPoints>
+
+## Siguientes pasos
+
+<Cards cols={3}>
+  <Card title="AWS Bedrock y AgentCore" href="/guia/aws-bedrock-agentcore">Runtime, Memory, Gateway, Identity, Policy y Evaluations.</Card>
+  <Card title="LangGraph" href="/guia/langgraph">El enfoque opuesto: control explícito del flujo con grafos de estado.</Card>
+  <Card title="Comparativa de frameworks" href="/guia/comparativa-frameworks">Strands frente a ADK, LangGraph y el resto.</Card>
+</Cards>

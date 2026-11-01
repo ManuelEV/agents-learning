@@ -1,0 +1,129 @@
+Construir un agente en una empresa no es elegir "un framework". Es componer **media docena de piezas** —modelo, orquestación, herramientas, conocimiento, memoria, seguridad y operación— y decidir cuáles construyes, cuáles compras y cómo se conectan. Esta página es el mapa; el resto de la guía profundiza en cada zona.
+
+<Callout type="info" title="Si vienes de ADK + AI Gateway + Bedrock">
+Tu stack ya cubre tres capas clave: **orquestación** (ADK), **acceso a modelos** (gateway) y **modelos** (Bedrock). Lo que esta guía agrega es el resto del mapa —RAG, MCP, A2A, runtime gestionado, evaluación y gobierno— y cómo encaja con lo que ya tienes. Ve directo a la [arquitectura de referencia de tu stack](/guia/arquitectura-adk-gateway-bedrock) si quieres el resultado final.
+</Callout>
+
+## El mapa en una imagen
+
+Cada petición a un agente empresarial atraviesa las mismas capas. Recorre los pasos para seguir una consulta real de punta a punta:
+
+<Diagram id="ecosistema" />
+
+| Capa | Qué resuelve | Opciones representativas (oct. 2026) |
+|---|---|---|
+| **Modelos** | Razonamiento y decisión | Claude en Bedrock / Foundry / Agent Platform, Gemini, GPT, modelos abiertos (Workers AI, vLLM) |
+| **Acceso a modelos (LLM gateway)** | Claves, presupuestos, fallbacks, caché, auditoría | LiteLLM Proxy, Cloudflare AI Gateway, Vercel AI Gateway, Kong, Agent Router, AgentCore Gateway (inference targets) |
+| **Orquestación** | El loop, multiagente, estado | Google ADK, AWS Strands, LangGraph, OpenAI Agents SDK, Microsoft Agent Framework, Claude Agent SDK, CrewAI, Pydantic AI, Mastra |
+| **Herramientas** | Actuar sobre sistemas | MCP (servidores propios o de terceros), tool gateways (AgentCore Gateway, Foundry Toolboxes, Docker MCP Gateway) |
+| **Conocimiento** | Responder con datos propios | Bedrock Knowledge Bases, Agent Platform RAG Engine, Azure AI Search, Cloudflare AI Search, pgvector/OpenSearch/S3 Vectors |
+| **Memoria** | Continuidad entre turnos y sesiones | AgentCore Memory, Agent Platform Sessions/Memory Bank, checkpointers de LangGraph |
+| **Interoperabilidad** | Agentes de distintos equipos/proveedores | A2A v1, registros de agentes (AWS Agent Registry, Google Agent Registry, Entra Agent Registry) |
+| **Runtime** | Ejecutar con aislamiento y escala | AgentCore Runtime, Agent Runtime (ex Agent Engine), Foundry hosted agents, Cloud Run/ECS/GKE, Cloudflare Durable Objects |
+| **Seguridad y gobierno** | Identidad, políticas, guardrails | AgentCore Identity/Policy, Bedrock Guardrails, Model Armor, Entra Agent ID, OWASP Agentic Top 10 |
+| **Calidad y operación** | Medir y observar | Evals (AgentCore Evaluations, ADK eval, LangSmith, Langfuse, RAGAS), OpenTelemetry GenAI |
+
+## Cinco niveles de abstracción
+
+La primera decisión no es *qué* framework, sino **cuánto quieres construir**. Piensa en una escalera: cada peldaño reduce el código propio y aumenta la dependencia del proveedor.
+
+<Diagram id="panorama-caminos" height={640} />
+
+En la práctica, la combinación ganadora en empresas es **framework open source (nivel 2) sobre plataforma gestionada (nivel 4)**: mantienes el código de negocio portable y testeable, y delegas la operación (aislamiento, identidad, memoria, escalado) en el proveedor cloud donde ya están tus datos.
+
+<Callout type="warning" title="Bedrock Agents (Classic) ya no acepta clientes nuevos">
+AWS renombró el servicio original a **Bedrock Agents Classic** y recomienda **Bedrock AgentCore** para proyectos nuevos. Muchos tutoriales de 2024–2025 todavía usan el clásico: evítalos como punto de partida.
+</Callout>
+
+## Frameworks: el corazón de la orquestación
+
+Hay más de diez frameworks serios. Estos son los que más vas a encontrar en entornos empresariales:
+
+<Cards cols={3}>
+  <Card title="Google ADK" tag="Py · TS · Go · Java" href="/guia/google-adk">
+    Agentes jerárquicos, workflows en grafo (2.x), sesiones y callbacks. Multimodelo vía LiteLLM, A2A nativo.
+  </Card>
+  <Card title="AWS Strands" tag="Py · TS" href="/guia/strands-agents">
+    Enfoque *model-driven* con poco código; agents-as-tools, Swarm y Graph; integración directa con AgentCore.
+  </Card>
+  <Card title="LangGraph" tag="Py · JS" href="/guia/langgraph">
+    Grafos de estado explícitos, ejecución durable con checkpointers y human-in-the-loop de primera clase.
+  </Card>
+  <Card title="Microsoft Agent Framework" tag=".NET · Py" href="/guia/otros-frameworks">
+    Sucesor de Semantic Kernel y AutoGen, 1.0 GA en abril de 2026; natural en Azure/Foundry.
+  </Card>
+  <Card title="OpenAI Agents SDK" tag="Py · JS" href="/guia/otros-frameworks">
+    Pocas primitivas (agents, handoffs, guardrails), sessions y tracing integrado.
+  </Card>
+  <Card title="Claude Agent SDK" tag="Py · TS" href="/guia/otros-frameworks">
+    El harness de Claude Code como librería: herramientas de archivos/terminal, subagentes, skills, MCP.
+  </Card>
+</Cards>
+
+La [comparativa de frameworks](/guia/comparativa-frameworks) incluye una tabla detallada y un diagrama de decisión.
+
+## Protocolos: el gran cambio de 2025–2026
+
+Hace dos años cada framework tenía su propia forma de conectar herramientas y agentes. Hoy hay **estándares abiertos bajo gobernanza neutral**: en diciembre de 2025 la Linux Foundation creó la **Agentic AI Foundation (AAIF)**, que hoy alberga MCP, AGENTS.md, goose, A2A (desde agosto de 2026) y Agent Skills (desde octubre de 2026).
+
+| Protocolo | Conecta | Estado (oct. 2026) |
+|---|---|---|
+| [MCP](/guia/mcp) | Agente ↔ herramientas y datos | Spec `2026-07-28`: **stateless**, MRTR, extensión Tasks, OAuth 2.1 |
+| [A2A](/guia/a2a) | Agente ↔ agente | v1.0.1; Agent Cards firmadas, gRPC/JSON-RPC/REST |
+| AG-UI | Agente ↔ interfaz de usuario | Protocolo de eventos (CopilotKit) |
+| Agent Skills | Conocimiento procedimental empaquetado | Estándar abierto, adoptado por 70+ plataformas |
+| AGENTS.md | Instrucciones para agentes de código | "README para agentes", 60k+ repos |
+
+<Callout type="tip">
+Diseña tus integraciones **con MCP desde el día uno**, aunque hoy uses un solo framework: tus herramientas quedan reutilizables por cualquier agente, IDE o plataforma, y puedes gobernarlas centralmente con un tool gateway.
+</Callout>
+
+## Plataformas cloud: dónde corre el agente
+
+Los tres hiperescaladores convergieron en la misma arquitectura: **runtime aislado por sesión + memoria + identidad + gateway de herramientas + registro + evaluación**, aceptando cualquier framework.
+
+<Cards cols={3}>
+  <Card title="AWS · Bedrock AgentCore" href="/guia/aws-bedrock-agentcore">
+    GA desde oct. 2025. Runtime, Gateway, Memory, Identity, Policy (Cedar), Evaluations, Harness, Registry.
+  </Card>
+  <Card title="Google · Gemini Enterprise Agent Platform" href="/guia/google-agent-platform">
+    La evolución de Vertex AI (abr. 2026): Agent Runtime, Memory Bank, Agent Gateway, Agent Registry.
+  </Card>
+  <Card title="Microsoft · Foundry Agent Service" href="/guia/microsoft-foundry-cloudflare">
+    Prompt agents y hosted agents, Toolboxes MCP, Entra Agent ID, A2A v1.0 GA.
+  </Card>
+</Cards>
+
+Y en el borde, **Cloudflare** ofrece agentes con estado sobre Durable Objects, AI Gateway y AI Search: ideal para agentes de cara al público con baja latencia.
+
+## Qué cambió en 2026 (y desactualiza tutoriales)
+
+<Steps>
+
+1. **MCP es stateless** desde la spec `2026-07-28`: desaparece el handshake `initialize` y las sesiones del protocolo; sampling y roots quedan deprecados. Mucho material todavía describe la versión 2025.
+2. **A2A llegó a v1.0** (marzo de 2026) con cambios incompatibles respecto de 0.3 (operaciones en PascalCase, `Part` unificado).
+3. **Renombres masivos**: Vertex AI → Gemini Enterprise Agent Platform (Agent Engine → Agent Runtime); Azure AI Foundry → Microsoft Foundry; Cloudflare AutoRAG → AI Search; LangGraph Platform → LangSmith Deployment.
+4. **ADK 2.0** (GA mayo de 2026 en Python) introduce workflows en grafo que reemplazan a los agentes de workflow clásicos; las docs se mudaron a **adk.dev**.
+5. **Los "harness" se volvieron una categoría**: agentes preconfigurados con compactación y planificación (Claude Agent SDK, Strands Harness, AgentCore Harness, Microsoft Harness Agent).
+6. **Seguridad de la cadena de suministro**: las versiones 1.82.7 y 1.82.8 de LiteLLM en PyPI fueron comprometidas (marzo de 2026). Fija versiones (`litellm>=1.84`) y verifica dependencias.
+
+</Steps>
+
+## Cómo decidir sin perderse
+
+<KeyPoints title="Heurísticas que funcionan">
+
+- **Empieza simple**: una llamada bien diseñada → workflow → agente → multiagente. Sube solo cuando una medición lo justifique.
+- **Corre donde están tus datos**: si tu información vive en AWS, el runtime y el RAG gestionado de AWS reducen latencia, costo y fricción de seguridad.
+- **Framework portable + protocolos estándar** (MCP, A2A) minimizan el lock-in más que cualquier elección de proveedor.
+- **Centraliza el acceso a modelos** con un gateway desde el principio: presupuesto, auditoría y fallback son difíciles de agregar después.
+- **Evals y trazas no son opcionales**: sin ellos no sabrás si un cambio de prompt, modelo o framework mejoró o empeoró el sistema.
+
+</KeyPoints>
+
+## Por dónde seguir
+
+<Cards cols={2}>
+  <Card title="Ruta de aprendizaje" href="/guia/ruta-de-aprendizaje">Siete niveles, de fundamentos a orquestación multiagente, con proyectos hito.</Card>
+  <Card title="¿Qué es un agente?" href="/guia/que-es-un-agente">El loop agéntico por dentro y la decisión workflow vs. agente.</Card>
+</Cards>

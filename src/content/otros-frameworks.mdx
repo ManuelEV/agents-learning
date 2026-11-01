@@ -1,0 +1,293 @@
+Además de [Google ADK](/guia/google-adk), [Strands](/guia/strands-agents) y [LangGraph](/guia/langgraph), el ecosistema de octubre de 2026 tiene al menos nueve frameworks que vale la pena conocer. No todos compiten en la misma capa: algunos son **SDKs de agente** que te dan el loop listo, otros son **frameworks de orquestación** con workflows y estado, y otros son **plataformas** donde el framework y el runtime vienen juntos. Esta página los recorre con lo esencial para decidir: qué son, sus conceptos clave, cuándo elegirlos y un ejemplo corto.
+
+## El mapa por capas
+
+<Diagram id="otros-frameworks-mapa" />
+
+<Cards cols={3}>
+  <Card title="SDKs de agente y harnesses" tag="capa 1">
+    OpenAI Agents SDK, Claude Agent SDK, CrewAI, Vercel AI SDK. El loop agéntico listo, con mínimo código.
+  </Card>
+  <Card title="Orquestación y workflows" tag="capa 2">
+    Microsoft Agent Framework, LlamaIndex, Pydantic AI, Mastra. Workflows explícitos, estado, durabilidad.
+  </Card>
+  <Card title="Plataformas" tag="capa 3">
+    Cloudflare Agents SDK (framework + runtime en el edge). Y runtimes agnósticos: AgentCore, Agent Runtime, Foundry.
+  </Card>
+</Cards>
+
+Una tendencia de 2026 atraviesa las tres capas: los **harnesses**. Strands Harness, el *Harness Agent* de Microsoft, el harness de Pydantic AI v2 y el `HarnessAgent` de Vercel AI SDK convergen en agentes preconfigurados con compactación de contexto, planificación y herramientas base, que luego personalizas. Es la misma idea que hizo exitoso a Claude Code: un buen loop genérico supera a muchos loops ad hoc.
+
+## OpenAI Agents SDK
+
+**Qué es**: el SDK de agentes de OpenAI (Python `openai-agents` **0.24.0**, 15-10-2026; también en JS). Sucesor de Swarm, con muy pocas primitivas: `Agent`, `Runner`, **handoffs**, **guardrails**, **sessions** y **tracing** activado por defecto. Soporta MCP, *sandbox agents* y agentes de voz en tiempo real. Aunque está optimizado para modelos de OpenAI, admite otros proveedores.
+
+<Diagram id="otros-frameworks-handoffs" />
+
+```python title="triage.py"
+import asyncio
+from agents import Agent, Runner, SQLiteSession, handoff
+
+billing_agent = Agent(name="Billing agent", instructions="Resuelves dudas de facturación y comprobantes.")
+refund_agent = Agent(name="Refund agent", instructions="Gestionas reembolsos según la política vigente.")
+triage_agent = Agent(
+    name="Triage agent",
+    instructions="Deriva al agente correcto. No resuelvas tú los casos.",
+    handoffs=[billing_agent, handoff(refund_agent)],   # cada handoff es una tool transfer_to_*
+)
+
+async def main():
+    session = SQLiteSession("cliente-881")             # historial persistente entre ejecuciones
+    result = await Runner.run(triage_agent, "Me cobraron después de cancelar, quiero mi dinero", session=session)
+    print(result.final_output)
+
+asyncio.run(main())
+```
+
+**Cuándo elegirlo**: equipos que usan modelos de OpenAI, quieren primitivas simples y tracing sin configuración. Para durabilidad, la integración **Temporal + OpenAI Agents SDK** (GA el 23-03-2026) ejecuta el loop como Workflow y las llamadas al modelo como Activities. Considera que sigue en versión 0.x: espera cambios de API.
+
+## Claude Agent SDK
+
+**Qué es**: el harness de **Claude Code como librería** (Python `claude-agent-sdk`, npm `@anthropic-ai/claude-agent-sdk`). Trae el loop agéntico, herramientas integradas (Read, Edit, Bash, Glob, Grep, WebSearch), gestión automática de contexto, permisos, hooks, sesiones con *resume/fork*, **subagentes** (`AgentDefinition`), MCP, Skills, plugins y límites de presupuesto (`max_budget_usd`). Funciona con la API de Anthropic, **Bedrock** (`CLAUDE_CODE_USE_BEDROCK=1`), Google Cloud (`CLAUDE_CODE_USE_VERTEX=1`) y Microsoft Foundry.
+
+```python title="revisor.py"
+import asyncio
+from claude_agent_sdk import query, ClaudeAgentOptions, AgentDefinition
+
+async def main():
+    async for message in query(
+        prompt="Revisa el módulo de pagos en busca de problemas de seguridad",
+        options=ClaudeAgentOptions(
+            allowed_tools=["Read", "Grep", "Glob", "Agent"],   # sin Bash ni Edit: solo lectura
+            agents={"security-reviewer": AgentDefinition(
+                description="Experto en revisión de seguridad (OWASP).",
+                prompt="Eres un revisor de seguridad. Reporta hallazgos con archivo y línea.",
+                tools=["Read", "Grep", "Glob"], model="sonnet")},
+        ),
+    ):
+        if hasattr(message, "result"):
+            print(message.result)
+
+asyncio.run(main())
+```
+
+**Cuándo elegirlo**: agentes que trabajan sobre **archivos, código o un sistema operativo** (revisión de código, migraciones, análisis de documentos, automatización de operaciones) y donde Claude es el modelo. El *lock-in* es alto (solo Claude), a cambio de un harness muy probado. Anthropic también ofrece **Managed Agents**, el mismo harness alojado por Anthropic con sandbox gestionado.
+
+## Microsoft Agent Framework
+
+**Qué es**: el sucesor unificado de **Semantic Kernel y AutoGen**. **1.0 GA para .NET y Python en abril de 2026**; Go en preview. Combina agentes con **workflows en grafo** (checkpointing, human-in-the-loop, reanudación) y orquestaciones predefinidas: *sequential*, *concurrent*, *handoff*, *group chat* y *Magentic-One*. Soporta MCP y A2A. En preview: DevUI, hosted agents en Foundry, AG-UI y Skills.
+
+```python title="hello_agent.py"
+import asyncio
+from agent_framework import Agent
+from agent_framework.foundry import FoundryChatClient
+from azure.identity import AzureCliCredential
+
+agent = Agent(
+    client=FoundryChatClient(
+        project_endpoint="https://<svc>.services.ai.azure.com/api/projects/<project>",
+        model="gpt-5.4-mini",
+        credential=AzureCliCredential(),      # identidad Entra, sin claves en el código
+    ),
+    name="AsistenteRRHH",
+    instructions="Respondes preguntas sobre políticas de RR. HH. citando el documento fuente.",
+)
+
+async def main():
+    print(await agent.run("¿Cuántos días de vacaciones tengo tras 5 años en la empresa?"))
+
+asyncio.run(main())
+```
+
+**Cuándo elegirlo**: organizaciones **.NET** o centradas en **Azure/Microsoft 365**, que necesitan workflows robustos con aprobación humana y quieren publicar en Teams/Copilot vía Foundry. Si vienes de Semantic Kernel o AutoGen, es la ruta de migración oficial. Detalles de la plataforma en [Microsoft Foundry y Cloudflare](/guia/microsoft-foundry-cloudflare).
+
+## CrewAI
+
+**Qué es**: framework Python (1.15.x) con una metáfora de **equipos**: agentes con `role`, `goal` y `backstory`, **Tasks** con salida esperada, **Crews** que las ejecutan en proceso secuencial o jerárquico (con un manager), y **Flows** orientados a eventos (`@start`, `@listen`) para orquestación determinista y estado.
+
+```python title="crew_ventas.py"
+from crewai import Agent, Task, Crew, Process
+
+analyst = Agent(role="Analista de datos", goal="Explicar la variación de ventas Q3", backstory="Experta en BI retail")
+writer = Agent(role="Redactor", goal="Escribir informes ejecutivos claros", backstory="Redactor técnico")
+
+t1 = Task(description="Analiza las ventas Q3 por región y categoría", expected_output="5 hallazgos clave", agent=analyst)
+t2 = Task(description="Escribe un resumen ejecutivo para gerencia", expected_output="1 página", agent=writer)
+
+crew = Crew(agents=[analyst, writer], tasks=[t1, t2], process=Process.sequential)
+print(crew.kickoff(inputs={}))
+```
+
+**Cuándo elegirlo**: prototipos rápidos de colaboración multiagente orientada a tareas (investigación, contenido, análisis), equipos que valoran la legibilidad de la metáfora rol/tarea. Para producción, apóyate en **Flows** para el control y en evaluación rigurosa: la autonomía de los crews jerárquicos es difícil de predecir.
+
+## LlamaIndex
+
+**Qué es**: el framework de referencia para **datos y RAG** (core 0.14.x, Python y TypeScript). Sus agentes (`FunctionAgent`, `ReActAgent`, `AgentWorkflow` multiagente) se construyen sobre **Workflows** orientados a eventos, y se integran de forma nativa con cientos de conectores, índices y *query engines*.
+
+```python title="agente_contratos.py"
+import asyncio
+from llama_index.core.agent.workflow import FunctionAgent
+from llama_index.llms.bedrock_converse import BedrockConverse
+
+def buscar_clausula(contrato_id: str, tema: str) -> str:
+    """Busca la cláusula de un contrato por tema (p. ej. 'terminación', 'multas')."""
+    return f"Cláusula 12.3 del contrato {contrato_id}: terminación con 60 días de aviso."
+
+agent = FunctionAgent(
+    tools=[buscar_clausula],
+    llm=BedrockConverse(model="global.anthropic.claude-sonnet-5-5", region_name="us-east-1"),
+    system_prompt="Eres un asistente legal. Cita siempre la cláusula exacta.",
+)
+
+async def main():
+    print(await agent.run(user_msg="¿Cómo termino anticipadamente el contrato C-2041?"))
+
+asyncio.run(main())
+```
+
+**Cuándo elegirlo**: agentes **intensivos en documentos** (contratos, manuales, reportes financieros) donde la calidad del retrieval es lo central: parsing, indexado jerárquico, query engines como herramientas. El paquete de integración con Bedrock (`llama-index-llms-bedrock-converse`) y su firma no los verificamos en esta revisión. Ver [RAG](/guia/rag).
+
+## Pydantic AI v2
+
+**Qué es**: el framework de agentes del equipo de Pydantic. **v2 GA el 23-06-2026**. Su sello es el **tipado**: outputs validados con modelos Pydantic, **inyección de dependencias** (`deps_type` + `RunContext`), Pydantic Graph para flujos, MCP, AG-UI, observabilidad OTel/Logfire y **ejecución durable** con Temporal, DBOS, Prefect o Restate. v2 suma un *harness* preconfigurado.
+
+```python title="clasificador_reclamos.py"
+from pydantic import BaseModel
+from pydantic_ai import Agent, RunContext
+
+class Reclamo(BaseModel):
+    categoria: str          # "despacho" | "producto" | "cobro"
+    urgencia: int           # 1 a 5
+    requiere_humano: bool
+
+agent = Agent(
+    "bedrock:global.anthropic.claude-sonnet-5-5",   # formato proveedor:modelo
+    output_type=Reclamo,                             # la salida se valida contra el modelo
+    instructions="Clasificas reclamos de clientes de retail.",
+    deps_type=str,                                   # dependencia inyectada: ID de cliente
+)
+
+@agent.tool
+def historial_cliente(ctx: RunContext[str]) -> list[str]:
+    """Devuelve los últimos reclamos del cliente."""
+    return [f"{ctx.deps}: despacho tardío (sept)"]
+
+result = agent.run_sync("Otra vez llegó tarde y el producto venía roto", deps="cliente-881")
+print(result.output)        # Reclamo(categoria='producto', urgencia=4, requiere_humano=True)
+```
+
+**Cuándo elegirlo**: equipos Python que valoran **tipos, testabilidad y DI** (estilo FastAPI), pipelines de extracción/clasificación con salidas estructuradas, y casos que necesitan durabilidad seria vía Temporal. El formato exacto del string de Bedrock (`bedrock:...`) y los cambios de API de v2 conviene confirmarlos en la doc de modelos.
+
+## Mastra
+
+**Qué es**: framework **TypeScript** (`@mastra/core` 1.x) con agentes, workflows, memoria, RAG, evals y OTel integrados, y un servidor de desarrollo con playground. Pensado para equipos full-stack JS que no quieren mezclar Python en su stack.
+
+```ts title="src/mastra/agents/soporte.ts"
+import { Agent } from "@mastra/core/agent";
+import { createTool } from "@mastra/core/tools";
+import { z } from "zod";
+
+const orderStatus = createTool({
+  id: "get-order-status",
+  description: "Consulta el estado logístico de un pedido",
+  inputSchema: z.object({ orderId: z.string() }),
+  execute: async ({ context }) => ({ orderId: context.orderId, status: "retrasado" }),
+});
+
+export const soporteAgent = new Agent({
+  id: "soporte-agent",
+  name: "Soporte pedidos",
+  instructions: "Ayudas con pedidos. Usa las herramientas; no inventes datos.",
+  model: "anthropic/claude-sonnet-5-5",   // formato proveedor/modelo; verifica el ID vigente
+  tools: { orderStatus },
+});
+```
+
+**Cuándo elegirlo**: productos SaaS en **Next.js/Node** donde el agente es parte de la app y quieres workflows + memoria + evals en el mismo lenguaje. La firma del `execute` de `createTool` (en particular `context`) cambió entre versiones: verifícala en la doc 1.x.
+
+## Vercel AI SDK
+
+**Qué es**: el SDK TypeScript más usado para apps con IA (`ai` **v7**). Además de streaming a la UI y abstracción de proveedores, ofrece **`ToolLoopAgent`** (un agente con loop de herramientas configurable con `stopWhen` y `prepareStep`) y `HarnessAgent`.
+
+```ts title="weather-agent.ts"
+import { ToolLoopAgent, tool } from "ai";
+import { z } from "zod";
+
+const storeAgent = new ToolLoopAgent({
+  model: "anthropic/claude-sonnet-5.5",   // string del AI Gateway de Vercel
+  tools: {
+    stock: tool({
+      description: "Consulta el stock de un SKU en una tienda",
+      inputSchema: z.object({ sku: z.string(), tienda: z.string() }),
+      execute: async ({ sku, tienda }) => ({ sku, tienda, unidades: 12 }),
+    }),
+  },
+});
+
+const result = await storeAgent.generate({ prompt: "¿Hay stock del SKU 7781 en Providencia?" });
+console.log(result.text);
+```
+
+**Cuándo elegirlo**: agentes embebidos en **apps web** con UI de chat y streaming, especialmente en Next.js. Para lógica de negocio compleja o durabilidad, combínalo con un backend de orquestación o con Cloudflare/Mastra.
+
+## Cloudflare Agents SDK
+
+**Qué es**: SDK TypeScript (`agents` 0.x) donde **cada agente es un Durable Object**: una instancia con estado persistente propio (SQLite embebido), WebSockets, scheduler de tareas y cliente MCP, que corre en el edge de Cloudflare. Es framework y plataforma a la vez.
+
+```ts title="src/index.ts"
+import { Agent, routeAgentRequest } from "agents";
+
+type State = { pedidosConsultados: number };
+
+export class SoporteAgent extends Agent<Env, State> {
+  initialState = { pedidosConsultados: 0 };
+  async onRequest(request: Request) {
+    this.setState({ pedidosConsultados: this.state.pedidosConsultados + 1 });   // persistido en el DO
+    return Response.json(this.state);
+  }
+}
+
+export default {
+  async fetch(request, env) {
+    return (await routeAgentRequest(request, env)) || new Response("Not found", { status: 404 });
+  },
+} satisfies ExportedHandler<Env>;
+```
+
+**Cuándo elegirlo**: agentes con **estado por usuario o por entidad**, tiempo real (WebSockets), tareas programadas y baja latencia global, sin administrar infraestructura. El *lock-in* con Cloudflare es alto y la versión es 0.x.
+
+## Resumen rápido
+
+| Framework | Lenguajes | Concepto central | Elige si… |
+|---|---|---|---|
+| OpenAI Agents SDK | Python, JS | Handoffs + guardrails + tracing | Usas modelos OpenAI y quieres primitivas simples |
+| Claude Agent SDK | Python, TS | Harness de Claude Code | El agente trabaja con archivos/código y usas Claude |
+| MS Agent Framework | .NET, Python, Go (preview) | Agentes + workflows en grafo | Stack .NET/Azure/M365 |
+| CrewAI | Python | Crews de roles + Flows | Prototipos multiagente legibles |
+| LlamaIndex | Python, TS | Agentes sobre workflows de datos | RAG y documentos son el centro |
+| Pydantic AI v2 | Python | Tipado + DI + durable | Salidas estructuradas y testabilidad |
+| Mastra | TypeScript | Agentes + workflows + memoria | Equipo full-stack JS |
+| Vercel AI SDK | TypeScript | `ToolLoopAgent` + streaming UI | Agente dentro de una app web |
+| Cloudflare Agents | TypeScript | Agente = Durable Object | Estado por entidad, tiempo real, edge |
+
+<Callout type="tip" title="El framework importa menos de lo que parece">
+La calidad de un agente depende sobre todo de **las herramientas, el contexto y la evaluación**. Todos estos frameworks implementan el mismo loop; elegir mal se corrige, pero sin evals no sabrás si elegiste mal. Usa estándares (MCP para herramientas, A2A entre agentes, OpenTelemetry para trazas) para que cambiar de framework no implique reescribir integraciones.
+</Callout>
+
+<KeyPoints>
+
+- Los frameworks viven en **capas**: SDKs/harnesses, orquestación y plataformas. Se combinan.
+- **OpenAI Agents SDK** y **Claude Agent SDK** son harnesses ligados a su proveedor; el segundo es ideal para agentes sobre archivos y código.
+- **Microsoft Agent Framework** (1.0 GA abril de 2026) es la opción para .NET/Azure; **LlamaIndex** para RAG; **Pydantic AI** para tipado y durabilidad.
+- En TypeScript: **Mastra** (framework completo), **Vercel AI SDK** (agentes en apps web), **Cloudflare Agents** (estado en el edge).
+- Los **harnesses** preconfigurados son la tendencia de 2026.
+
+</KeyPoints>
+
+## Siguientes pasos
+
+<Cards cols={3}>
+  <Card title="Comparativa y guía de decisión" href="/guia/comparativa-frameworks">Tabla completa, diagrama de decisión y cómo evaluar en 2 semanas.</Card>
+  <Card title="Microsoft Foundry y Cloudflare" href="/guia/microsoft-foundry-cloudflare">Hosted agents, Toolboxes MCP y Agents SDK en el edge.</Card>
+  <Card title="Patrones de diseño" href="/guia/patrones-de-diseno">Handoffs, orquestador-workers y cuándo usar cada uno.</Card>
+</Cards>

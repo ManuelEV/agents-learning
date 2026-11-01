@@ -1,0 +1,80 @@
+import type { IsoSpec } from '../components/iso/types'
+
+export const foundryHostedAgent: IsoSpec = {
+  id: 'foundry-hosted-agent',
+  title: 'Hosted agent en Microsoft Foundry',
+  summary:
+    'Un **hosted agent** es tu código (Agent Framework, LangGraph, Claude Agent SDK…) empaquetado como contenedor. Foundry le asigna un **endpoint** con varios protocolos, una **identidad Entra** propia y un **sandbox aislado por sesión**; las herramientas llegan por un único **Toolbox MCP endpoint**.',
+  height: 490,
+  zones: [{ id: 'foundry', label: 'Proyecto de Microsoft Foundry', from: [1.6, -4.9], to: [11.2, 4.9], tone: 'agent' }],
+  nodes: [
+    { id: 'user', label: 'Teams / M365', sub: 'o app propia', at: [-1.4, 0], shape: 'person', tone: 'user', icon: 'users', info: 'Un ejecutivo de finanzas conversa con el agente desde Teams o Microsoft 365 Copilot; una app interna puede llamar al mismo agente por API.' },
+    { id: 'endpoint', label: 'Endpoint', at: [2.9, 0], shape: 'hex', tone: 'gateway', icon: 'router', info: 'Endpoint dedicado por agente con los protocolos declarados: **Responses** (compatible OpenAI), **Invocations** (payload libre, webhooks, AG-UI), Invocations WebSocket y **A2A v1.0** (GA). Activity se puentea automáticamente al publicar en Teams/M365.' },
+    { id: 'entra', label: 'Entra Agent ID', at: [2.9, -3.4], shape: 'box', tone: 'guard', icon: 'key', info: 'Cada hosted agent recibe automáticamente una identidad Microsoft Entra dedicada. Con usuario presente se admite On-Behalf-Of; en tareas autónomas actúa con su propia identidad.' },
+    { id: 'sandbox', label: 'Hosted agent', sub: 'sandbox', at: [6.4, 0], shape: 'tall', tone: 'agent', icon: 'cpu', info: 'Tu contenedor corre en un sandbox aislado por VM para cada sesión, con `$HOME` y `/files` persistentes. Escala a cero tras el idle timeout (2-240 min, 15 por defecto) y restaura el estado al volver.' },
+    { id: 'model', label: 'Foundry Models', sub: 'GPT · Claude', at: [6.4, -3.4], shape: 'sphere', tone: 'model', icon: 'brain', info: 'El agente llama a los modelos del catálogo a través del endpoint del proyecto (Responses API). Claude está disponible alojado en Azure o en infraestructura de Anthropic.' },
+    { id: 'state', label: 'Estado de sesión', sub: '$HOME · state store', at: [6.4, 3.4], shape: 'cylinder', tone: 'memory', icon: 'database', info: 'Conversaciones persistidas por Foundry, archivos de sesión y un *state store* clave-valor para checkpoints de LangGraph o Agent Framework.' },
+    { id: 'toolbox', label: 'Toolbox', sub: 'endpoint MCP', at: [9.8, 0], shape: 'hex', tone: 'protocol', icon: 'plug', info: 'Agrupa herramientas (web search, file search, code interpreter, Azure AI Search, OpenAPI, MCP, A2A) tras **un único endpoint MCP** con autenticación, gobierno y versionado centralizados.' },
+    { id: 'insights', label: 'App Insights', sub: 'trazas OTel · evals', at: [9.8, 3.4], shape: 'box', tone: 'infra', icon: 'chart', info: 'Foundry inyecta la cadena de conexión de Application Insights; las librerías de protocolo emiten trazas OpenTelemetry por defecto.' },
+    { id: 'search', label: 'Azure AI Search', sub: 'políticas internas', at: [13.2, -1.7], shape: 'stack', tone: 'data', icon: 'search', info: 'Índice híbrido con semantic ranker sobre las políticas de gastos y viajes.' },
+    { id: 'erp', label: 'ERP / SharePoint', sub: 'vía MCP u OpenAPI', at: [13.2, 1.7], shape: 'box', tone: 'tool', icon: 'server', info: 'Sistemas internos expuestos como herramientas; el Toolbox usa la identidad del agente o el token del usuario (OBO).' },
+  ],
+  edges: [
+    { from: 'user', to: 'endpoint' },
+    { from: 'endpoint', to: 'entra', dashed: true },
+    { from: 'endpoint', to: 'sandbox' },
+    { from: 'sandbox', to: 'model' },
+    { from: 'sandbox', to: 'state' },
+    { from: 'sandbox', to: 'toolbox', label: 'MCP' },
+    { from: 'sandbox', to: 'insights', route: 'x', dashed: true },
+    { from: 'toolbox', to: 'search', route: 'z' },
+    { from: 'toolbox', to: 'erp', route: 'z' },
+  ],
+  steps: [
+    { title: '1 · Petición desde Teams', body: 'El usuario pregunta en Teams: "¿Puedo aprobar este gasto de viaje de 1.800 USD?". La plataforma traduce Activity → **Responses** y autentica con Entra ID.', flows: ['user>endpoint'] },
+    { title: '2 · Identidad del agente', body: 'El agente actúa con su **Entra Agent ID**; como hay usuario presente, puede usar On-Behalf-Of para consultar datos con los permisos del ejecutivo.', flows: ['endpoint>entra'], focus: ['endpoint', 'entra'] },
+    { title: '3 · Sandbox de la sesión', body: 'Foundry enruta al **sandbox de esa sesión** (o crea uno) y restaura `$HOME`, `/files` y el historial de la conversación.', flows: ['endpoint>sandbox', 'state>sandbox'] },
+    { title: '4 · Modelo', body: 'Tu código (p. ej. Microsoft Agent Framework) llama a un modelo del catálogo vía el endpoint del proyecto: GPT o Claude según la tarea.', flows: ['sandbox>model', 'model>sandbox'] },
+    { title: '5 · Herramientas vía Toolbox', body: 'El agente usa el **Toolbox MCP endpoint**: busca la política de viajes en Azure AI Search y el presupuesto del centro de costo en el ERP.', flows: ['sandbox>toolbox', 'toolbox>search', 'toolbox>erp'] },
+    { title: '6 · Respuesta y observabilidad', body: 'La respuesta vuelve a Teams. Las trazas OTel van a Application Insights; tras el idle timeout el sandbox se apaga y el estado queda persistido.', flows: ['sandbox>endpoint', 'endpoint>user', 'sandbox>insights'] },
+  ],
+}
+
+export const cloudflareEdgeAgent: IsoSpec = {
+  id: 'cloudflare-edge-agent',
+  title: 'Agente en el edge con Cloudflare',
+  summary:
+    'Con el **Agents SDK**, cada agente es un **Durable Object**: una instancia con identidad propia (p. ej. una por cliente), SQL local, WebSockets y scheduler. Los modelos se llaman a través de **AI Gateway** (Workers AI o Bedrock), el conocimiento viene de **AI Search** y las herramientas de servidores **MCP remotos** en Workers.',
+  height: 480,
+  nodes: [
+    { id: 'user', label: 'Cliente', sub: 'web · móvil', at: [0, 0], shape: 'person', tone: 'user', icon: 'user', info: 'Un cliente de una tienda online abre el chat de soporte. La conexión WebSocket termina en la ubicación de Cloudflare más cercana.' },
+    { id: 'worker', label: 'Worker', sub: 'routeAgentRequest', at: [3.2, 0], shape: 'box', tone: 'infra', icon: 'zap', info: 'El Worker de entrada autentica y enruta `/agents/:agente/:instancia` al Durable Object correcto con `routeAgentRequest`.' },
+    { id: 'agent', label: 'Agent (DO)', sub: 'una instancia por cliente', at: [6.4, 0], shape: 'tall', tone: 'agent', icon: 'bot', info: 'Clase que extiende `Agent`: un Durable Object con identidad durable. Mantiene el estado (`setState`), WebSockets, tareas programadas y el loop del agente.' },
+    { id: 'sql', label: 'SQLite del DO', sub: 'estado + historial', at: [6.4, 3.4], shape: 'cylinder', tone: 'memory', icon: 'database', info: 'Cada instancia tiene su propia base SQL (`this.sql`): historial, preferencias, carrito. Aislamiento por diseño entre clientes.' },
+    { id: 'aigw', label: 'AI Gateway', sub: 'caché · fallback · logs', at: [9.6, -3.4], shape: 'hex', tone: 'gateway', icon: 'router', info: 'Proxy hacia más de 20 proveedores: analítica, logs, caché, rate limiting, reintentos y fallback entre modelos, incluido Amazon Bedrock.' },
+    { id: 'wai', label: 'Workers AI', sub: 'modelos abiertos', at: [13, -4.9], shape: 'sphere', tone: 'model', icon: 'cpu', info: 'Inferencia serverless de modelos abiertos en la red de Cloudflare: barata y cercana al usuario para clasificación o respuestas simples.' },
+    { id: 'bedrock', label: 'Amazon Bedrock', sub: 'Claude vía perfil', at: [13, -2.1], shape: 'cloud', tone: 'model', icon: 'cloud', info: 'Para razonamiento complejo, AI Gateway reenvía a Bedrock (`.../aws-bedrock/bedrock-runtime/us-east-1/`) firmando con SigV4.' },
+    { id: 'mcp', label: 'MCP remoto', sub: 'Worker + OAuth', at: [9.6, 0], shape: 'box', tone: 'protocol', icon: 'plug', info: 'Servidor MCP en Workers sobre Streamable HTTP, protegido con OAuth (`createMcpHandler` + `OAuthResourceServer`). Envuelve la API de pedidos.' },
+    { id: 'api', label: 'API de pedidos', sub: 'origen', at: [13, 1.3], shape: 'box', tone: 'tool', icon: 'server', info: 'Backend existente (en AWS, por ejemplo) al que solo accede el servidor MCP.' },
+    { id: 'aisearch', label: 'AI Search', sub: 'híbrido · MCP', at: [9.6, 3.4], shape: 'stack', tone: 'data', icon: 'search', info: 'Búsqueda gestionada (ex AutoRAG, GA 01-10-2026): indexación continua, híbrida por defecto y un endpoint MCP por instancia.' },
+  ],
+  edges: [
+    { from: 'user', to: 'worker', label: 'WebSocket' },
+    { from: 'worker', to: 'agent' },
+    { from: 'agent', to: 'sql' },
+    { from: 'agent', to: 'aigw', route: 'z' },
+    { from: 'aigw', to: 'wai', route: 'z' },
+    { from: 'aigw', to: 'bedrock', route: 'z' },
+    { from: 'agent', to: 'mcp' },
+    { from: 'mcp', to: 'api', route: 'z' },
+    { from: 'agent', to: 'aisearch', route: 'z' },
+  ],
+  steps: [
+    { title: '1 · Conexión al edge', body: 'El cliente abre un WebSocket. El Worker de entrada valida la sesión y enruta a `/agents/soporte/cliente-8812`.', flows: ['user>worker', 'worker>agent'] },
+    { title: '2 · Instancia por cliente', body: 'Ese nombre identifica **un Durable Object único**: si no existe se crea; si existe, recupera su estado e historial de su propia SQLite.', flows: ['sql>agent'], focus: ['agent', 'sql'] },
+    { title: '3 · Modelo vía AI Gateway', body: 'Clasificar la intención va a un modelo abierto en **Workers AI**; la respuesta compleja va a **Claude en Bedrock**. AI Gateway registra costo, cachea y hace fallback.', flows: ['agent>aigw', 'aigw>wai', 'aigw>bedrock'] },
+    { title: '4 · Conocimiento', body: 'Para la política de cambios y garantías, el agente consulta **AI Search** (búsqueda híbrida sobre el centro de ayuda).', flows: ['agent>aisearch', 'aisearch>agent'] },
+    { title: '5 · Herramientas MCP', body: 'Para ver el pedido, llama al **servidor MCP remoto** con un token OAuth; el servidor consulta la API de pedidos de origen.', flows: ['agent>mcp', 'mcp>api', 'api>mcp', 'mcp>agent'] },
+    { title: '6 · Respuesta y seguimiento', body: 'La respuesta se transmite por el WebSocket y el estado se guarda en SQLite. El agente puede **programar** un recordatorio ("avisarte cuando el pedido salga a reparto") con su scheduler.', flows: ['agent>worker', 'worker>user', 'agent>sql'] },
+  ],
+}

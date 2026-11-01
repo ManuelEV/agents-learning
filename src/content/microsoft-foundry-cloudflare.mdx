@@ -1,0 +1,195 @@
+AWS y Google no son las únicas opciones serias para operar agentes. **Microsoft Foundry** es el camino natural si tu empresa vive en Microsoft 365, Entra ID y Azure: los agentes se publican en Teams y Copilot con la identidad corporativa ya resuelta. **Cloudflare** juega otro partido: agentes con estado que corren en el **edge**, cerca del usuario, con un modelo de costos y latencia muy distinto al de un runtime regional. Este artículo cubre ambos y termina con una **comparativa multinube** y una guía de decisión, con el estado a octubre de 2026.
+
+## Microsoft Foundry Agent Service
+
+**Microsoft Foundry** es el nuevo nombre de Azure AI Foundry desde Ignite (noviembre de 2025). Dentro de Foundry, **Foundry Agent Service** es la plataforma gestionada para construir, desplegar y escalar agentes con cualquier framework y cualquier modelo del catálogo. La nueva generación del servicio llegó a GA en marzo de 2026 y los *hosted agents* alrededor de junio de 2026.
+
+### Tipos de agente
+
+Foundry cubre todo el espectro entre "declarativo" y "código completo":
+
+| | Prompt agents | Hosted agents | Responses API ("agente efímero") |
+|---|---|---|---|
+| Qué defines | Instrucciones, modelo y tools (portal, SDK, REST o `azd`) | Tu código como contenedor o `.zip` | La definición vive en tu app; cada llamada arma el agente |
+| Código de runtime | Ninguno | Tu lógica de agente | Tu app |
+| Frameworks | — (opcional: *Copilot harness*, preview) | Agent Framework, LangGraph, OpenAI Agents SDK, Anthropic/Claude Agent SDK, Copilot SDK, propio | Cualquiera |
+| Cómputo | Totalmente gestionado | Sandbox gestionado por sesión (0,5–2 vCPU) | El tuyo |
+| Ideal para | Empezar rápido, agentes internos sin orquestación propia | Orquestación propia, multiagente, webhooks, AG-UI | Agentes que ya corren en otro sitio y solo quieren modelos y tools de Foundry |
+
+Hay además **voice-based prompt agents** <Badge tone="preview">Preview</Badge> para conversaciones de voz en tiempo real sobre Voice Live.
+
+Los **hosted agents** son los comparables con AgentCore Runtime y Agent Runtime: cada sesión corre en un **sandbox aislado por VM** con `$HOME` y `/files` persistentes, escala a cero tras un *idle timeout* configurable (2 a 240 minutos, 15 por defecto) y restaura el estado al volver. Las sesiones inactivas se eliminan tras 30 días. Cada versión es **inmutable** y el endpoint sirve el 100% del tráfico a una sola versión (no hay *traffic splitting*).
+
+### Toolboxes: herramientas tras un endpoint MCP
+
+Un **Toolbox** agrupa herramientas (web search, file search, code interpreter, memoria, Azure AI Search, OpenAPI, servidores MCP, A2A, skills) y las expone **detrás de un único endpoint MCP gestionado**, con autenticación, gobierno y versionado centralizados. Cualquier agente o runtime que hable MCP puede consumirlo; en Microsoft Agent Framework se usa `FoundryToolbox` (Python) o `AddFoundryToolboxes` (.NET). Creas una versión nueva, la pruebas y la promueves a *default* sin tocar los agentes.
+
+Es la misma idea que AgentCore Gateway o Agent Gateway: **un punto único para las herramientas**, en lugar de que cada agente configure sus propias conexiones y secretos.
+
+### Identidad, red y publicación
+
+- **Entra Agent ID**: cada hosted agent recibe automáticamente una **identidad Microsoft Entra dedicada**. Con usuario presente (p. ej. en Teams) admite **On-Behalf-Of** para actuar con los permisos delegados del usuario; en tareas autónomas usa su propia identidad. Los permisos sobre recursos externos se asignan con RBAC a esa identidad.
+- **Red**: los prompt agents admiten red privada; los hosted agents soportan *bring-your-own VNet*, con cada sesión conectada a tu red virtual.
+- **Protocolos**: **Responses** (compatible OpenAI, con historial gestionado), **Invocations** (payload libre: webhooks, AG-UI, batch), Invocations sobre WebSocket (voz) y **A2A v1.0** <Badge tone="ga">GA</Badge> (v0.3 sigue en preview). El protocolo **Activity** se puentea automáticamente al publicar en Microsoft 365.
+- **Publicación**: versionas el agente, obtienes un endpoint estable y lo distribuyes en **Microsoft Teams**, **Microsoft 365 Copilot** y el **Entra Agent Registry**.
+- **Seguridad**: guardrails integrados contra contenido inseguro e inyección de prompts, incluida la inyección indirecta (XPIA).
+
+<Diagram id="foundry-hosted-agent" />
+
+### Claude en Foundry
+
+Claude está disponible en Foundry en dos variantes: **alojado en Azure** (de punta a punta en infraestructura de Azure, GA para modelos como Sonnet 5.5, Opus 5.5 y Haiku 5.5) y **alojado en infraestructura de Anthropic**. Se accede con los SDKs de Anthropic y la **Messages API** en un endpoint con la forma `https://<recurso>.services.ai.azure.com/anthropic/v1/messages`, con despliegues *Global Standard* y *Data Zone Standard (US)* para la variante Azure. Requiere suscripción de Azure Marketplace y se factura en Claude Consumption Units (CCU).
+
+<Callout type="warning" title="Sin filtro de contenido por defecto para Claude">
+La documentación indica que Foundry **no aplica filtrado de contenido integrado a los modelos Claude** al desplegarlos. Configura tus propios controles de seguridad de contenido en inferencia (guardrails del agente, Azure AI Content Safety o equivalente).
+</Callout>
+
+### Microsoft Agent Framework
+
+**Microsoft Agent Framework** es el sucesor de Semantic Kernel y AutoGen: **1.0 GA en .NET y Python en abril de 2026** (Go en preview). Ofrece workflows en grafo con checkpointing y human-in-the-loop, orquestaciones secuenciales, concurrentes, *handoff*, *group chat* y Magentic-One, además de MCP y A2A. Es la opción "de casa" para hosted agents, aunque no la única:
+
+```python title="agente_gastos.py"
+import asyncio
+from agent_framework import Agent
+from agent_framework.foundry import FoundryChatClient
+from azure.identity import AzureCliCredential   # en Foundry: la identidad Entra del agente
+
+agent = Agent(
+    client=FoundryChatClient(
+        project_endpoint="https://contoso-ai.services.ai.azure.com/api/projects/finanzas",
+        model="gpt-5.4-mini",                # nombre de tu deployment en el proyecto
+        credential=AzureCliCredential(),
+    ),
+    name="AsistenteGastos",
+    instructions=(
+        "Ayudas a validar gastos de viaje contra la política corporativa. "
+        "Cita la sección de la política y nunca apruebes: solo recomiendas."
+    ),
+)
+
+async def main():
+    print(await agent.run("¿Un hotel de 280 USD por noche en Bogotá cumple la política?"))
+
+asyncio.run(main())
+```
+
+Para desplegarlo como hosted agent se empaqueta con las librerías de protocolo de Foundry (Responses o Invocations) y se publica con `azd` o el SDK; los samples oficiales están en el repositorio `microsoft-foundry/foundry-samples`.
+
+## Cloudflare: agentes en el edge
+
+Cloudflare no ofrece "un runtime regional de agentes" sino primitivas que corren en su red global. Para agentes, las piezas son cinco:
+
+<Cards cols={2}>
+  <Card title="Agents SDK" tag="Durable Objects">
+    Cada agente es un **Durable Object**: identidad durable, SQL local, WebSockets, scheduler y cliente MCP. Una instancia por usuario, por ticket o por documento.
+  </Card>
+  <Card title="MCP remoto en Workers" tag="Streamable HTTP + OAuth">
+    Servidores MCP desplegados como Workers, con `createMcpHandler` del Agents SDK y OAuth para autorizar a los clientes.
+  </Card>
+  <Card title="AI Gateway" tag="LLM gateway">
+    Analítica, logs, caché, rate limiting, reintentos y fallback hacia más de 20 proveedores, incluido Amazon Bedrock.
+  </Card>
+  <Card title="Workers AI + AI Search" tag="inferencia y RAG">
+    Inferencia serverless de modelos abiertos y búsqueda gestionada (ex AutoRAG, **GA 01-10-2026**) con endpoint MCP por instancia.
+  </Card>
+</Cards>
+
+### Agents SDK sobre Durable Objects
+
+La idea clave: **el estado vive junto al cómputo**. Cada instancia (`/agents/soporte/cliente-8812`) es un objeto único en el mundo, con su propia base SQLite, conexiones WebSocket en tiempo real y tareas programadas. No necesitas una base externa para el historial ni un servicio de sesiones aparte: el aislamiento entre clientes viene por diseño.
+
+```ts title="src/index.ts"
+import { Agent, routeAgentRequest } from "agents";
+
+type Estado = { consultas: number };
+
+export class SoporteAgent extends Agent<Env, Estado> {
+  initialState: Estado = { consultas: 0 };
+
+  async onRequest(request: Request) {
+    const { texto } = (await request.json()) as { texto: string };
+    // SQLite propia de esta instancia (un cliente = un Durable Object)
+    this.sql`CREATE TABLE IF NOT EXISTS mensajes (rol TEXT, texto TEXT, ts INTEGER)`;
+    this.sql`INSERT INTO mensajes VALUES ('user', ${texto}, ${Date.now()})`;
+    this.setState({ consultas: this.state.consultas + 1 });   // se sincroniza con clientes conectados
+    // Aquí iría el loop del agente: modelo vía AI Gateway, tools MCP, AI Search...
+    return Response.json({ ok: true, consultas: this.state.consultas });
+  }
+}
+
+export default {
+  async fetch(request: Request, env: Env) {
+    // Enruta /agents/:agente/:instancia al Durable Object correspondiente
+    return (await routeAgentRequest(request, env)) || new Response("No encontrado", { status: 404 });
+  },
+} satisfies ExportedHandler<Env>;
+```
+
+El Agent necesita su binding de Durable Object y la migración SQLite en la configuración de Wrangler (consulta la página *Routing* de la documentación). El SDK está en versión 0.x y evoluciona rápido: la documentación actual recomienda además un *harness* (Pi) que mantiene la ejecución tras la expulsión del objeto, marcado como experimental.
+
+### MCP remoto, AI Gateway y AI Search
+
+- **MCP remoto**: la plantilla oficial arranca con `npm create cloudflare@latest -- remote-mcp-server-authless --template=cloudflare/ai/demos/remote-mcp-authless`. Para producción, envuelve el handler con `OAuthResourceServer` y un Worker `OAuthAuthorizationServer` (que puede delegar en GitHub, Google o Cloudflare Access); las tools leen el usuario con `getMcpAuthContext()`. Cloudflare recomienda scopes por operación y *step-up authorization* en vez de pedir todos los permisos al inicio.
+- **AI Gateway**: cambias la URL base del proveedor por la del gateway. Para Bedrock: `https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/aws-bedrock/bedrock-runtime/us-east-1/`, firmando la petición con SigV4 contra la URL original de AWS (p. ej. con `aws4fetch`). Ganas logs, costos, caché y fallback sin tocar tu código de agente.
+- **AI Search**: creas una instancia, conectas la fuente y la indexación es continua; búsqueda **híbrida por defecto** (semántica + keywords). Se consulta por binding de Workers, REST o el **endpoint MCP** que trae cada instancia, así que cualquier agente MCP (incluido uno en AgentCore) puede usarla.
+
+<Diagram id="cloudflare-edge-agent" />
+
+<Callout type="tip" title="Cloudflare como capa de borde de un agente en AWS">
+Un patrón híbrido frecuente: el agente principal corre en AgentCore, pero el chat de clientes (WebSockets, estado por usuario, rate limiting) vive en Durable Objects, y AI Gateway centraliza logs y costos hacia Bedrock. Cada nube hace lo que mejor sabe hacer.
+</Callout>
+
+## Comparativa multinube
+
+Mismas necesidades, distintos nombres. Estado a octubre de 2026:
+
+| Necesidad | AWS | Google Cloud | Microsoft Azure | Cloudflare |
+|---|---|---|---|---|
+| **Runtime de agentes** | AgentCore Runtime (microVM por sesión) | Agent Runtime | Foundry hosted agents (sandbox VM por sesión) | Agents SDK sobre Durable Objects |
+| **Agente sin código** | AgentCore Harness | Managed Agents API (preview), Agent Studio | Prompt agents | — |
+| **Memoria / estado** | AgentCore Memory (corto y largo plazo) | Sessions + Memory Bank | Conversaciones, state store, tool de memoria | SQLite y estado del Durable Object |
+| **Gateway de herramientas** | AgentCore Gateway (MCP) | Agent Gateway (egress) | Toolbox (endpoint MCP) | MCP remoto en Workers |
+| **LLM gateway** | Gateway *inference targets*, o LiteLLM | Apigee, o LiteLLM | Endpoint de proyecto Foundry | AI Gateway |
+| **Registro de agentes** | AWS Agent Registry | Agent Registry | Entra Agent Registry | Sin equivalente gestionado verificado |
+| **Guardrails** | Bedrock Guardrails (`ApplyGuardrail`), Policy (Cedar) | Model Armor, Semantic Governance | Guardrails de Foundry (incl. XPIA) | Sin equivalente verificado en esta guía; usa uno externo |
+| **RAG gestionado** | Knowledge Bases, Managed Knowledge Base | RAG Engine, Agent Search | Azure AI Search, file search | AI Search |
+| **A2A** | Runtime A2A (puerto 9000), Gateway passthrough | Registry con A2A v1.0 (GA); Runtime A2A (preview) | A2A v1.0 GA | No verificado |
+| **Identidad de agente** | AgentCore Identity (OAuth entrante/saliente) | Agent Identity (SPIFFE) | Entra Agent ID (+ OBO) | OAuth en Workers, Cloudflare Access |
+| **Claude** | Bedrock (perfiles `global.`/`us.`/`eu.`) | Model Garden | Foundry (alojado en Azure o Anthropic) | Vía AI Gateway (Bedrock, Anthropic) |
+
+## Guía de decisión
+
+<Steps>
+
+1. **Empieza por dónde están los datos y los usuarios.** Sistemas transaccionales en AWS → AgentCore. Empleados en Workspace y datos en BigQuery → Agent Platform + Gemini Enterprise. Empleados en Teams/M365 y Entra ID → Foundry. Usuarios finales globales con chat en tiempo real → Cloudflare en el borde.
+2. **Elige un framework portable.** ADK, LangGraph o Strands corren en las tres nubes grandes (AgentCore y Foundry aceptan contenedores con cualquier framework). Microsoft Agent Framework es la opción natural en Foundry; el Agents SDK de Cloudflare es TypeScript y específico de esa plataforma.
+3. **Estandariza los protocolos.** Herramientas por **MCP** y agentes por **A2A**: así un agente en AgentCore puede usar un Toolbox de Foundry o la instancia de AI Search de Cloudflare, y delegar en un agente de Agent Runtime.
+4. **Separa el LLM gateway del tool gateway.** El primero (LiteLLM, AI Gateway, Gateway inference targets) gobierna costos, cuotas y fallback de modelos; el segundo (AgentCore Gateway, Agent Gateway, Toolbox) gobierna qué acciones puede ejecutar cada agente.
+5. **Pon el gobierno fuera del agente.** Policy (Cedar), Agent Gateway + IAM o Toolbox + Entra: las reglas críticas deben vivir donde el modelo no las pueda saltar.
+
+</Steps>
+
+<Callout type="warning" title="El lock-in no está en el modelo, está en el estado">
+Cambiar de modelo es fácil; migrar **memoria, sesiones y políticas** no. Antes de adoptar Memory Bank, AgentCore Memory o el state store de Foundry, define cómo exportarías esos datos y qué parte de tu política vive en formatos portables (Cedar, IAM, OpenAPI).
+</Callout>
+
+<KeyPoints>
+
+- **Foundry Agent Service**: prompt agents (sin código) y hosted agents (tu contenedor, sandbox por sesión), **Toolboxes** tras un endpoint MCP, **Entra Agent ID**, **A2A v1.0 GA** y publicación en Teams/Copilot.
+- Claude está en Foundry (alojado en Azure o en Anthropic), pero **sin filtro de contenido por defecto**: añade el tuyo.
+- **Cloudflare**: cada agente es un **Durable Object** con estado y SQL propios; MCP remoto en Workers, **AI Gateway** (incluido Bedrock), Workers AI y **AI Search** (GA oct 2026).
+- Las tres nubes grandes convergen en el mismo patrón: **runtime aislado por sesión + gateway de herramientas MCP + identidad de agente + registro + guardrails**.
+- Decide por datos y usuarios; protege la portabilidad con frameworks abiertos, MCP y A2A.
+
+</KeyPoints>
+
+## Siguientes pasos
+
+<Cards cols={3}>
+  <Card title="AWS Bedrock y AgentCore" tag="plataforma" href="/guia/aws-bedrock-agentcore">La plataforma del lector de referencia, en detalle.</Card>
+  <Card title="Google Agent Platform" tag="plataforma" href="/guia/google-agent-platform">Agent Runtime, Agent Gateway y despliegue de ADK.</Card>
+  <Card title="Gateways" tag="conectar" href="/guia/gateways">LLM gateway vs. tool gateway, y cómo combinarlos.</Card>
+  <Card title="MCP" tag="protocolo" href="/guia/mcp">El protocolo detrás de Toolboxes, Gateway y servidores remotos.</Card>
+  <Card title="Comparativa de frameworks" tag="frameworks" href="/guia/comparativa-frameworks">ADK, Strands, LangGraph, Agent Framework y más, lado a lado.</Card>
+  <Card title="Multiagente con A2A" tag="arquitectura" href="/guia/arquitectura-multiagente-a2a">Agentes en distintas plataformas colaborando por A2A.</Card>
+</Cards>

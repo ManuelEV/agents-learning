@@ -1,0 +1,260 @@
+**RAG** (*Retrieval-Augmented Generation*) es la técnica de **recuperar información relevante de tus propias fuentes e inyectarla en el contexto del modelo** antes de que responda. Es la forma estándar de que un agente conozca tus políticas, manuales, contratos o tickets sin reentrenar nada, y de que pueda **citar** de dónde sale cada afirmación.
+
+En un agente, RAG deja de ser un pipeline fijo y se convierte en **una herramienta más**: el agente decide cuándo buscar, dónde y con qué palabras. Pero la calidad sigue dependiendo de lo mismo que en 2023: cómo ingieres los documentos y cómo recuperas los fragmentos.
+
+## Tres generaciones de RAG
+
+<Cards cols={3}>
+  <Card title="Naive RAG" tag="2023">
+    Trocear → vectorizar → top-k por similitud → generar. Funciona en demos; falla con siglas, códigos de producto, preguntas compuestas y documentos largos.
+  </Card>
+  <Card title="Advanced RAG" tag="estándar">
+    Reescritura de la query, **búsqueda híbrida** (BM25 + vectores) fusionada con **RRF**, **reranking**, filtros de metadatos y citas. Es la base mínima en producción.
+  </Card>
+  <Card title="Agentic RAG" tag="agentes">
+    El agente decide **si**, **dónde** y **cómo** buscar: varias fuentes (KB, SQL, tickets), varios pasos y autoevaluación de la evidencia antes de responder.
+  </Card>
+</Cards>
+
+No son excluyentes: un agentic RAG bien hecho usa por dentro una herramienta de advanced RAG. Lo que cambia es **quién orquesta** la recuperación: tu código o el modelo.
+
+<Callout type="tip" title="Antes de construir un RAG: ¿cabe todo en el prompt?">
+Anthropic lo dice explícitamente en su artículo de Contextual Retrieval: si tu base de conocimiento tiene **menos de 200.000 tokens (~500 páginas)**, puede ser mejor **meterla entera en el prompt** y usar **prompt caching** (en Bedrock, `cachePoint` en la Converse API con TTL de 5 min o 1 h). Te ahorras chunking, embeddings, índices y toda una clase de errores de recuperación. RAG empieza a compensar cuando el corpus crece, cambia a menudo o requiere permisos por documento.
+</Callout>
+
+## Ingesta y consulta: los dos pipelines
+
+Un RAG tiene dos mitades. La **ingesta** (offline, continua) prepara el conocimiento; la **consulta** (online, en cada pregunta) lo recupera. Recorre ambas pestañas:
+
+<Diagram ids={["rag-ingesta", "rag-consulta"]} height={560} />
+
+### Ingesta: donde se gana o se pierde la calidad
+
+<Steps>
+
+1. **Parsing**. Extrae texto **con estructura**: títulos, tablas, listas. Un PDF de condiciones comerciales con tablas aplanadas a texto plano produce chunks incomprensibles. Para escaneos o documentos con gráficos, usa OCR o un parser multimodal.
+2. **Chunking**. Divide en fragmentos de tamaño útil. No hay un tamaño mágico; 300–800 tokens con algo de solape es un punto de partida razonable que debes validar con evals.
+3. **Metadatos**. Adjunta a cada chunk: fuente, URI, fecha de vigencia, área, idioma, tipo de documento y **grupos con permiso de lectura**. Los metadatos permiten filtrar ("solo políticas vigentes de Chile") y son la base de la seguridad.
+4. **Embeddings**. Vectoriza cada chunk con un modelo de embeddings. Usa el mismo modelo al indexar y al consultar; cambiar de modelo implica **reindexar todo**.
+5. **Indexado dual**. Guarda el vector en un índice vectorial y el texto en un índice léxico (BM25). Ambos con el mismo id de chunk.
+
+</Steps>
+
+Estrategias de chunking más usadas:
+
+| Estrategia | Cómo funciona | Cuándo usarla |
+|---|---|---|
+| Tamaño fijo + solape | N tokens por chunk, solapando 10–20 % | Punto de partida; textos homogéneos |
+| Por estructura | Corta por secciones, títulos o artículos | Manuales, políticas, contratos con jerarquía clara |
+| Semántico | Corta donde cambia el tema (similitud entre oraciones) | Textos largos sin estructura (transcripciones, correos) |
+| Jerárquico (padre/hijo) | Indexa chunks pequeños, devuelve el bloque padre | Cuando necesitas precisión al buscar y contexto al generar |
+| Sin chunking | Documento completo | Documentos cortos (FAQ, fichas de producto) |
+
+### Consulta: varias técnicas baratas que se suman
+
+- **Reescritura de la query**: un modelo pequeño resuelve referencias del historial ("¿y para Perú?"), agrega sinónimos o descompone en subpreguntas. Variante: **HyDE**, que genera una respuesta hipotética y busca con ella.
+- **Búsqueda híbrida**: los embeddings capturan significado ("producto abierto" ≈ "embalaje dañado"), pero fallan con `SKU-88123`, "Ley 19.496" o siglas internas. BM25 cubre justo eso. Ejecuta ambas y **fusiónalas**.
+- **RRF** (*Reciprocal Rank Fusion*): cada documento suma `1 / (k + posición)` en cada lista, con `k ≈ 60`. Combina por posición, no por puntaje, así que no necesitas normalizar escalas incompatibles.
+- **Reranking**: un *cross-encoder* lee pregunta y fragmento juntos y los puntúa con mucha más precisión que la similitud de vectores. Recupera 50, reordena y quédate con 5–10. En Bedrock tienes **Amazon Rerank 1.0** y **Cohere Rerank 3.5** integrados en la API `Retrieve`.
+- **Citas**: pide al modelo que referencie cada afirmación con el id o URI del fragmento, y verifica en código que las citas existan en lo recuperado.
+
+Un esbozo de búsqueda híbrida con pgvector y la búsqueda de texto completo de Postgres, fusionada con RRF:
+
+```python title="hybrid_search.py"
+from collections import defaultdict
+
+VEC_SQL = """SELECT id FROM chunks
+  WHERE allowed_groups && %(groups)s            -- filtro ACL dentro de la búsqueda
+  ORDER BY embedding <=> %(qvec)s::vector LIMIT 50"""
+LEX_SQL = """SELECT id FROM chunks
+  WHERE allowed_groups && %(groups)s AND tsv @@ plainto_tsquery('spanish', %(q)s)
+  ORDER BY ts_rank_cd(tsv, plainto_tsquery('spanish', %(q)s)) DESC LIMIT 50"""
+
+def rrf(rankings: list[list[str]], k: int = 60) -> list[str]:
+    """Reciprocal Rank Fusion: suma 1/(k + posición) de cada lista."""
+    scores: dict[str, float] = defaultdict(float)
+    for ranking in rankings:
+        for pos, doc_id in enumerate(ranking, start=1):
+            scores[doc_id] += 1.0 / (k + pos)
+    return sorted(scores, key=scores.get, reverse=True)
+
+def hybrid_search(cur, q: str, qvec: list[float], groups: list[str], top: int = 30) -> list[str]:
+    params = {"q": q, "qvec": str(qvec), "groups": groups}
+    cur.execute(VEC_SQL, params); vec_ids = [r[0] for r in cur.fetchall()]
+    cur.execute(LEX_SQL, params); lex_ids = [r[0] for r in cur.fetchall()]
+    return rrf([vec_ids, lex_ids])[:top]       # luego: reranker → top 5–10
+```
+
+<Callout type="info">
+`ts_rank_cd` de Postgres no es BM25 estricto, pero cumple el mismo rol léxico. Si necesitas BM25 real dentro de Postgres existen extensiones de terceros; OpenSearch, Weaviate y Azure AI Search traen híbrido nativo.
+</Callout>
+
+## Contextual Retrieval: el truco con mejor retorno
+
+El problema del chunking es que **un fragmento pierde su contexto**: "El plazo se extiende a 30 días" no dice de qué producto ni de qué política. **Contextual Retrieval** (Anthropic, septiembre de 2024) lo resuelve anteponiendo a cada chunk **50–100 tokens de contexto generados por un LLM** que ve el documento completo, antes de vectorizar y de indexar en BM25.
+
+Resultados publicados por Anthropic (tasa de fallo de recuperación = 1 − recall@20):
+
+| Configuración | Tasa de fallo | Mejora vs. base |
+|---|---|---|
+| Embeddings estándar (base) | 5,7 % | — |
+| Contextual Embeddings | 3,7 % | −35 % |
+| Contextual Embeddings + Contextual BM25 | 2,9 % | −49 % |
+| + reranking | 1,9 % | **−67 %** |
+
+Con **prompt caching** del documento (se cachea una vez y se reutiliza para cada chunk), Anthropic estimó el costo en **~US$1,02 por millón de tokens de documento**, un costo único de ingesta. La conclusión práctica: la combinación **contexto + híbrido + reranking** es acumulativa, y cada pieza aporta.
+
+## GraphRAG: cuando la pregunta es sobre el corpus entero
+
+El RAG por fragmentos responde bien "¿qué dice la política X sobre Y?", pero mal "¿cuáles son los temas recurrentes en las quejas de 2026?". Para preguntas **globales** sobre un corpus, Microsoft propuso **GraphRAG**:
+
+1. Un LLM extrae **entidades y relaciones** de todos los documentos y arma un grafo de conocimiento.
+2. El grafo se agrupa en **comunidades** jerárquicas con el algoritmo **Leiden**.
+3. Se generan **resúmenes por comunidad** en cada nivel.
+4. En consulta eliges el modo: **Global** (map-reduce sobre resúmenes de comunidad, para preguntas de "panorama"), **Local** (parte de entidades concretas y sus vecinos), **DRIFT** (local enriquecido con contexto de comunidades) o **Basic** (RAG vectorial clásico).
+
+<Callout type="warning" title="GraphRAG es caro de construir">
+La extracción de entidades pasa **todo el corpus por un LLM**, a veces varias veces. Úsalo cuando tengas preguntas globales o multi-salto reales y medidas, no por moda. En AWS, Bedrock Knowledge Bases ofrece GraphRAG gestionado con **Neptune Analytics** (GA desde marzo de 2025).
+</Callout>
+
+## Agentic RAG
+
+En un agente, la recuperación es una herramienta con nombre y descripción, como cualquier otra. Eso habilita comportamientos que un pipeline fijo no tiene: elegir la fuente adecuada, reformular si los resultados son malos, combinar SQL con texto, y **no buscar** cuando no hace falta.
+
+<Diagram id="rag-agentico" />
+
+Este es el patrón típico para el lector de referencia: una **Knowledge Base de Bedrock** consultada con `Retrieve` (no `RetrieveAndGenerate`: queremos que el agente, no la KB, redacte), expuesta como herramienta de un agente **Google ADK** que llega a Claude a través de un AI gateway.
+
+```python title="kb_tool.py"
+import boto3
+from google.adk.agents import Agent
+from google.adk.models.lite_llm import LiteLlm
+from google.adk.tools import ToolContext
+
+kb = boto3.client("bedrock-agent-runtime", region_name="us-east-1")
+KB_ID = "KBPOLITICAS01"   # id de tu Knowledge Base
+RERANK = "arn:aws:bedrock:us-east-1::foundation-model/cohere.rerank-v3-5:0"
+
+def search_policies(query: str, tool_context: ToolContext) -> dict:
+    """Busca en las políticas comerciales vigentes. Devuelve fragmentos con su fuente para citar.
+
+    Args:
+        query: Pregunta o términos de búsqueda en lenguaje natural.
+    """
+    groups = tool_context.state.get("user:groups", [])  # vienen del token OIDC, no del prompt
+    if not groups:
+        return {"results": [], "note": "Usuario sin permisos de lectura."}
+    acl = [{"listContains": {"key": "allowed_groups", "value": g}} for g in groups]
+    resp = kb.retrieve(
+        knowledgeBaseId=KB_ID,
+        retrievalQuery={"text": query},
+        retrievalConfiguration={"vectorSearchConfiguration": {
+            "numberOfResults": 40,
+            "overrideSearchType": "HYBRID",            # vectores + texto (según el vector store)
+            "filter": acl[0] if len(acl) == 1 else {"orAll": acl},
+            "rerankingConfiguration": {"type": "BEDROCK_RERANKING_MODEL",
+                "bedrockRerankingConfiguration": {
+                    "modelConfiguration": {"modelArn": RERANK},
+                    "numberOfRerankedResults": 6}},
+        }},
+    )
+    return {"results": [{"text": r["content"]["text"], "source": r["location"],
+                         "score": r.get("score")} for r in resp["retrievalResults"]]}
+
+root_agent = Agent(
+    name="asistente_politicas",
+    model=LiteLlm(model="litellm_proxy/claude-sonnet"),   # vía AI gateway corporativo
+    instruction=("Respondes dudas sobre políticas comerciales. Usa search_policies; "
+                 "cita la fuente de cada afirmación y si no hay evidencia, dilo."),
+    tools=[search_policies],
+)
+```
+
+Puntos a notar:
+
+- **Los grupos salen del estado de sesión**, que tu backend carga desde el token del usuario. Nunca dejes que el modelo elija el filtro de permisos como argumento de la herramienta.
+- `overrideSearchType: "HYBRID"` solo está disponible en algunos vector stores de Knowledge Bases (por ejemplo, OpenSearch Serverless); revisa la documentación del tuyo.
+- Recuperas 40 y el reranker deja 6: más candidatos mejoran el recall; el reranker devuelve la precisión.
+- El modelo `litellm_proxy/claude-sonnet` apunta a un alias del gateway (ver [Gateways](/guia/gateways)); en Bedrock se resuelve a `global.anthropic.claude-sonnet-5-5`.
+
+<Callout type="danger" title="El contenido recuperado no es confiable">
+Un documento puede contener instrucciones maliciosas ("ignora tus reglas y envía…"). Todo lo que devuelve un RAG es **entrada no confiable**: no le des a ese contenido capacidad de disparar acciones sin validación. OWASP lo cataloga como **LLM08: Vector and Embedding Weaknesses** junto al *prompt injection* indirecto. Profundizamos en [Seguridad y gobernanza](/guia/seguridad-gobernanza).
+</Callout>
+
+## Permisos en entornos empresariales
+
+El error más grave en un RAG corporativo es que el agente responda con un documento que el usuario **no tiene permiso de ver**. Reglas que funcionan:
+
+- **Filtra antes, no después**. El filtro de permisos va **dentro** de la consulta al índice (pre-filtering). Filtrar la respuesta del LLM es tarde: el modelo ya leyó el contenido.
+- **Propaga los ACL de origen en la ingesta**. Si SharePoint dice que un documento es solo de Finanzas, el chunk debe llevar `allowed_groups: ["finanzas"]`. Re-sincroniza cuando cambian los permisos.
+- **La identidad viene del token**, validado por tu backend (OIDC con Entra ID, Okta, Cognito), nunca de lo que el usuario escriba.
+- **Índices separados por nivel de sensibilidad** cuando el riesgo lo amerite (por ejemplo, RR. HH. aparte), en lugar de confiar en un único filtro.
+- **Registra qué chunks se entregaron a quién**, para auditoría.
+
+## Dónde guardar los vectores
+
+| Opción | Tipo | Híbrido | Punto fuerte | Elígelo si… |
+|---|---|---|---|---|
+| **pgvector** | Extensión de Postgres (Aurora/RDS, Cloud SQL, AlloyDB, Azure) | Con la búsqueda de texto de Postgres | Joins y transacciones con datos de negocio | Ya operas Postgres y el volumen es moderado |
+| **OpenSearch** | Motor de búsqueda (Serverless o gestionado) | Nativo | Léxico + vectorial maduro; store por defecto de Bedrock KB | Quieres híbrido serio en AWS |
+| **S3 Vectors** | Almacenamiento vectorial en S3 (GA dic. 2025) | Orientado a vectores | Costo mínimo, hasta 2.000 M de vectores por índice, latencia sub-segundo | Corpus enorme con consultas poco frecuentes |
+| **Pinecone** | SaaS gestionado | Sí (sparse + dense) | Cero operación; integrado con Bedrock KB y RAG Engine | Prefieres SaaS y no hay restricción de residencia |
+| **Weaviate** | OSS o gestionado | Nativo | Módulos y multi-tenancy | Quieres OSS con híbrido incluido |
+| **Qdrant** | OSS en Rust (o cloud) | Sí | Filtrado por payload muy rápido | Filtros complejos de metadatos/ACL |
+| **AlloyDB AI** | Postgres de Google con ScaNN | Con texto de Postgres | Rendimiento vectorial alto en Postgres | Estás en Google Cloud y quieres Postgres |
+| **Azure AI Search** | Servicio de búsqueda | Nativo + *semantic ranker* | Integración natural con Foundry y M365 | Estás en Azure |
+
+### Opciones gestionadas de punta a punta
+
+<Cards cols={3}>
+  <Card title="Bedrock Knowledge Bases" tag="AWS">
+    Conectores (S3, SharePoint, Confluence…), chunking configurable, vector stores (S3 Vectors, OpenSearch, Aurora pgvector, Neptune Analytics para **GraphRAG**, Pinecone, Redis, MongoDB Atlas), filtros de metadatos y **reranking** en `Retrieve`. AgentCore suma una **Managed Knowledge Base** expuesta vía Gateway (GA a mediados de 2026).
+  </Card>
+  <Card title="Agent Platform RAG Engine" tag="Google Cloud">
+    El RAG gestionado de Gemini Enterprise Agent Platform (ex Vertex AI): RagManagedDb, Vector Search, Feature Store, Pinecone o Weaviate como backend, con VPC-SC y CMEK. Para búsqueda empresarial lista para usar existe **Agent Search** (ex Vertex AI Search).
+  </Card>
+  <Card title="Cloudflare AI Search" tag="Edge">
+    Ex AutoRAG, **GA desde el 1 de octubre de 2026**. Búsqueda híbrida por defecto y un **endpoint MCP por instancia**, lo que permite conectarlo a cualquier agente como herramienta MCP.
+  </Card>
+</Cards>
+
+Regla práctica: empieza con la opción gestionada de tu nube (menos piezas que operar) y baja a un vector store propio solo cuando necesites control fino del chunking, del ranking o del costo.
+
+## Evaluar un RAG: recuperación y generación por separado
+
+Un RAG falla de dos maneras distintas, y hay que medirlas por separado:
+
+| Capa | Pregunta | Métricas |
+|---|---|---|
+| **Recuperación** | ¿Llegó el fragmento correcto al contexto? | recall@k, MRR, Context Precision, Context Recall |
+| **Generación** | ¿La respuesta es fiel a lo recuperado y responde la pregunta? | Faithfulness, Response Relevancy, Noise Sensitivity |
+| **Agente** | ¿Usó bien las herramientas y cumplió el objetivo? | Tool Call Accuracy, Agent Goal Accuracy, Topic Adherence |
+
+**RAGAS** implementa todas estas métricas (las de generación, con un LLM como juez). La distinción importa: si el *recall@k* es bajo, ningún prompt arreglará la respuesta; si el recall es alto pero la *faithfulness* es baja, el problema está en la generación (el modelo inventa o mezcla). Empieza con 30–50 preguntas reales con su respuesta y documento esperados, y corre la suite en cada cambio de chunking, embeddings o prompts. Detalles en [Evaluación y observabilidad](/guia/evaluacion-observabilidad).
+
+<Callout type="warning" title="Errores comunes">
+- Chunks sin metadatos: imposible filtrar por vigencia o permisos después.
+- Solo búsqueda vectorial: fallan códigos, siglas y nombres propios.
+- Top-k sin reranking: el fragmento correcto aparece en el puesto 14 y nunca llega al modelo.
+- Evaluar solo "a ojo" la respuesta final: no sabes si falla la recuperación o la generación.
+- Reindexar todo en cada cambio de un documento: diseña la sincronización incremental desde el día uno.
+</Callout>
+
+<KeyPoints>
+
+- Si el corpus cabe en **menos de 200k tokens**, prueba primero ponerlo entero en el prompt con caching.
+- La base de producción es **advanced RAG**: híbrido BM25 + vectores, RRF, reranking, metadatos y citas.
+- **Contextual Retrieval** + híbrido + reranking redujo los fallos de recuperación un **67 %** en las pruebas de Anthropic.
+- En agentes, la recuperación es **una herramienta**: el agente elige fuente y formulación (agentic RAG).
+- **Permisos**: ACL propagados en la ingesta y filtro **dentro** de la búsqueda, con la identidad del token.
+- Mide **recall@k** y **faithfulness** por separado; GraphRAG solo si tienes preguntas globales reales.
+
+</KeyPoints>
+
+## Siguientes pasos
+
+<Cards cols={3}>
+  <Card title="MCP" href="/guia/mcp">Expón tu búsqueda y tus sistemas como herramientas estándar para cualquier agente.</Card>
+  <Card title="Context engineering" href="/guia/context-engineering">Cuánto recuperar, cómo compactar y cuándo cargar just-in-time.</Card>
+  <Card title="Arquitectura soporte con RAG + MCP" href="/guia/arquitectura-soporte-rag-mcp">Un caso completo de punta a punta.</Card>
+</Cards>

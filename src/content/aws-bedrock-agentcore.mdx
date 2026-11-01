@@ -1,0 +1,355 @@
+En AWS, construir agentes empresariales se apoya en dos capas que conviene no confundir. **Amazon Bedrock** es la capa de **modelos**: inferencia gestionada sobre Claude, Nova, Llama, OpenAI y otros, con guardrails, caché de prompts y bases de conocimiento. **Amazon Bedrock AgentCore** es la capa de **operación de agentes**: dónde corre tu código, cómo se autentica, qué herramientas puede tocar, qué recuerda y cómo se observa. AgentCore no te obliga a usar modelos de Bedrock ni un framework concreto: puedes desplegar un agente de Google ADK que llame a Claude vía LiteLLM, y AgentCore se encarga del resto.
+
+Si tu empresa ya vive en AWS, este es probablemente el camino con menos fricción hacia producción. Veamos cada pieza con el estado vigente a **octubre de 2026**.
+
+## Bedrock: la capa de modelos
+
+### APIs y endpoints
+
+Bedrock ofrece varias formas de invocar un modelo. Para agentes, las relevantes son:
+
+- **Converse / ConverseStream**: API unificada de chat con *tool use*, independiente del proveedor. Es la base de Strands, de LiteLLM (`bedrock/converse/...`) y de casi cualquier integración seria.
+- **InvokeModel**: cuerpo nativo de cada proveedor (por ejemplo, el formato Messages de Anthropic con `cache_control`).
+- **APIs compatibles con OpenAI y Anthropic**: Chat Completions, Responses y Messages, para reutilizar SDKs existentes cambiando solo la URL base y la clave.
+
+Hay dos superficies de endpoint, que comparten el mismo motor de inferencia (llamado **Mantle**) y el mismo precio por token:
+
+| | `bedrock-runtime.{region}.amazonaws.com` | `bedrock-mantle.{region}.api.aws` |
+|---|---|---|
+| APIs | InvokeModel, Converse, Chat Completions, Responses, Messages | Chat Completions, Responses, Messages |
+| Perfiles entre regiones (`global.`, `us.`…) | Sí | No |
+| Guardrails | Sí | No |
+| Tools del lado del servidor (web search), inferencia en background | No | Sí |
+| Cuándo usarlo | **Por defecto** para agentes | Si necesitas Projects/Workspaces, tools server-side o un modelo que solo está ahí |
+
+Ambos aceptan SigV4 y **API keys de Bedrock**. Con los SDKs de AWS basta exportar `AWS_BEARER_TOKEN_BEDROCK`; aun así, la key está asociada a un principal IAM y solo concede lo que su política permite. En producción, prefiere roles IAM (sin secretos de larga duración) y deja las API keys para pruebas o herramientas que solo hablan el dialecto OpenAI.
+
+### Perfiles de inferencia entre regiones
+
+Los Claude recientes en Bedrock **solo se invocan on-demand mediante un perfil de inferencia**. El ID base del modelo (`anthropic.claude-sonnet-5-5`) identifica el modelo; para llamarlo usas el ID del perfil, que añade un prefijo de alcance:
+
+| Prefijo | Ejemplo | Enruta a | Úsalo cuando |
+|---|---|---|---|
+| `global.` | `global.anthropic.claude-sonnet-5-5` | Cualquier región comercial con capacidad | No tienes restricciones de residencia; ≈10% más barato |
+| `us.` | `us.anthropic.claude-opus-5-5` | Regiones de EE. UU. | Datos que deben quedarse en EE. UU. |
+| `eu.` | `eu.anthropic.claude-sonnet-5-5` | Regiones de la UE | GDPR, banca o sector público europeo |
+| `apac.`, `jp.`, `au.` | `jp.anthropic.claude-haiku-5-5` | Asia-Pacífico, Japón, Australia | Residencia regional |
+
+Si usas el ID base con un Claude reciente, obtendrás un error 400. Y hay una trampa clásica: **IAM (y tus SCPs) deben permitir el foundation model en todas las regiones destino del perfil**, no solo en la región desde la que llamas. Si una SCP bloquea `us-west-2`, verás `AccessDenied` intermitentes según adónde enrute el perfil.
+
+### Prompt caching
+
+Un agente reenvía en cada turno el mismo prefijo: definiciones de herramientas, system prompt, políticas de negocio. El **prompt caching** cobra ese prefijo como lectura de caché (más barato y rápido) cuando se repite. En Converse marcas el final del bloque estático con un `cachePoint`:
+
+- Hasta **4 checkpoints** por petición en Claude, en `tools`, `system` y `messages` (se procesan en ese orden: cambiar `tools` invalida todo lo posterior).
+- TTL de **5 minutos** por defecto o **1 hora** con `"ttl": "1h"` en los Claude 5.x y 4.5+. Las entradas de 1 h deben ir antes que las de 5 min.
+- Mínimo de tokens acumulados antes del checkpoint: **512** en la familia Claude 5.5 (otros modelos piden entre 1.024 y 4.096).
+- La respuesta desglosa `cacheReadInputTokens` y `cacheWriteInputTokens`; `inputTokens` pasa a contar solo lo no cacheado.
+
+El TTL de 1 h es ideal para agentes: el usuario tarda más de 5 minutos en responder, o un subagente trabaja largo rato, y el prefijo sigue caliente. Además, los aciertos de caché no consumen tu cuota de rate limit.
+
+Recorre el camino completo de una inferencia:
+
+<Diagram id="aws-bedrock-inferencia" />
+
+### Converse con caché y guardrail
+
+Ejemplo realista: un asistente de devoluciones de retail con ~6.000 tokens de políticas estáticas, un guardrail corporativo y Claude Sonnet 5.5 vía perfil global. La segunda pestaña muestra `ApplyGuardrail`, que evalúa texto **sin invocar ningún modelo**: sirve para aplicar el mismo guardrail a respuestas de Gemini, de un modelo autoalojado o de cualquier proveedor detrás de tu gateway.
+
+<CodeTabs labels={["Converse + cachePoint + guardrail", "ApplyGuardrail (cualquier modelo)"]}>
+
+```python title="devoluciones.py"
+import boto3
+
+bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
+POLITICAS = open("politicas_devoluciones.md", encoding="utf-8").read()  # ~6.000 tokens estáticos
+
+def responder(pregunta: str) -> str:
+    resp = bedrock.converse(
+        modelId="global.anthropic.claude-sonnet-5-5",   # perfil, no el ID base
+        system=[
+            {"text": "Eres el asistente de devoluciones de una cadena de retail. "
+                     "Responde solo con base en las políticas. Si no aplica, deriva a un humano."},
+            {"text": POLITICAS},
+            {"cachePoint": {"type": "default", "ttl": "1h"}},   # todo lo anterior se cachea 1 h
+        ],
+        messages=[{"role": "user", "content": [{"text": pregunta}]}],
+        inferenceConfig={"maxTokens": 1024},
+        guardrailConfig={
+            "guardrailIdentifier": "gr-retail-atencion",   # ID o ARN del guardrail
+            "guardrailVersion": "3",                        # versión publicada, nunca DRAFT en prod
+            "trace": "enabled",
+        },
+    )
+    u = resp["usage"]
+    print(f"cache read={u.get('cacheReadInputTokens', 0)} write={u.get('cacheWriteInputTokens', 0)}")
+    if resp["stopReason"] == "guardrail_intervened":
+        return "No puedo ayudarte con eso. Te derivo con un ejecutivo."
+    return resp["output"]["message"]["content"][0]["text"]
+```
+
+```python title="guardrail_universal.py"
+import boto3
+
+bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
+
+def revisar_salida(texto_generado: str) -> str:
+    """Aplica el guardrail corporativo a la respuesta de CUALQUIER modelo."""
+    r = bedrock.apply_guardrail(
+        guardrailIdentifier="gr-retail-atencion",
+        guardrailVersion="3",
+        source="OUTPUT",                       # "INPUT" para validar el prompt del usuario
+        content=[{"text": {"text": texto_generado}}],
+    )
+    if r["action"] == "GUARDRAIL_INTERVENED":
+        # outputs trae el texto enmascarado (p. ej. PII anonimizada) o el mensaje de bloqueo
+        return r["outputs"][0]["text"] if r["outputs"] else "[respuesta bloqueada]"
+    return texto_generado
+```
+
+</CodeTabs>
+
+### IAM mínimo para un perfil de inferencia
+
+Siguiendo el patrón de la documentación de AWS: un statement para el ARN del **perfil** en tu región de origen y otro para el **foundation model** en las regiones destino, condicionado a que la llamada llegue a través de ese perfil. Para un perfil `global.`, el modelo se referencia también con el ARN sin región (`arn:aws:bedrock:::foundation-model/...`).
+
+```json title="policy-bedrock-sonnet-global.json"
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "InvocarPerfilGlobal",
+      "Effect": "Allow",
+      "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+      "Resource": "arn:aws:bedrock:us-east-1:111122223333:inference-profile/global.anthropic.claude-sonnet-5-5"
+    },
+    {
+      "Sid": "ModeloSoloViaPerfil",
+      "Effect": "Allow",
+      "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+      "Resource": [
+        "arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-5-5",
+        "arn:aws:bedrock:::foundation-model/anthropic.claude-sonnet-5-5"
+      ],
+      "Condition": {
+        "StringLike": {
+          "bedrock:InferenceProfileArn": "arn:aws:bedrock:us-east-1:111122223333:inference-profile/global.anthropic.claude-sonnet-5-5"
+        }
+      }
+    }
+  ]
+}
+```
+
+`ConverseStream` requiere `InvokeModelWithResponseStream`; `Converse`, `InvokeModel`. Si usas un perfil geográfico (`us.`), reemplaza el comodín de región por la lista explícita de regiones del perfil si tu política de seguridad no admite `*`.
+
+<Callout type="warning" title="Residencia de datos con global.">
+Con `global.` la inferencia puede ejecutarse fuera de tu geografía (los datos en reposo, como logs y Knowledge Bases, permanecen en tu región). Si tienes obligaciones regulatorias, usa `eu.` o `us.`, y bloquea el enrutamiento global con un `Deny` sobre `bedrock:InvokeModel*` condicionado a `aws:RequestedRegion = unspecified`, como sugiere la documentación de perfiles.
+</Callout>
+
+## Guardrails
+
+**Amazon Bedrock Guardrails** es la capa de políticas de contenido configurable y reutilizable. Un guardrail combina:
+
+- **Filtros de contenido** (odio, violencia, sexual, insultos, conducta indebida) y **prompt attack** (jailbreaks e inyección de prompts).
+- **Temas denegados** descritos en lenguaje natural ("asesoría de inversión personalizada").
+- **Filtros de palabras** y **PII/regex** con bloqueo o enmascarado (RUT, números de tarjeta, correos).
+- **Contextual grounding**: verifica que la respuesta esté sustentada en la fuente recuperada y sea relevante a la pregunta; muy útil para RAG.
+- **Automated Reasoning checks**: valida afirmaciones contra reglas formalizadas (p. ej. una política de elegibilidad), con verificación lógica en lugar de otro LLM.
+
+Se aplica de tres formas: en línea con `guardrailConfig` en Converse/InvokeModel, de forma independiente con `ApplyGuardrail` (cualquier modelo, cualquier nube) y, desde 2026, **dentro de AgentCore Policy**, evaluando entradas y salidas de herramientas en el Gateway, fuera del código del agente.
+
+## Knowledge Bases
+
+**Bedrock Knowledge Bases** es el RAG gestionado: ingesta desde S3, SharePoint, Confluence, web y otras fuentes, troceado, embeddings y recuperación con `Retrieve` o `RetrieveAndGenerate`. La decisión clave es el **vector store**:
+
+| Vector store | Fuerte en | Considera si… |
+|---|---|---|
+| **S3 Vectors** (GA 02-12-2025) | Costo mínimo, hasta 2.000 millones de vectores por índice | Consultas poco frecuentes, corpus enormes, latencia sub-segundo aceptable |
+| **OpenSearch Serverless / Managed** | Búsqueda híbrida (léxica + vectorial) | Necesitas keywords exactos (SKU, códigos de error) además de semántica |
+| **Aurora PostgreSQL (pgvector)** | Reutilizar tu Postgres, SQL y filtros | Ya operas Aurora y quieres joins con datos transaccionales |
+| **Neptune Analytics** (GraphRAG, GA 07-03-2025) | Relaciones entre entidades | Preguntas multi-salto: "¿qué proveedores afectan a estos pedidos?" |
+| Pinecone, Redis Enterprise Cloud, MongoDB Atlas | SaaS que ya tengas | Estandarización corporativa previa |
+
+Para mejorar precisión, `Retrieve` y `RetrieveAndGenerate` aceptan **reranking** con Amazon Rerank 1.0 o Cohere Rerank 3.5. En agentes, la práctica recomendada es exponer la KB como **una herramienta más** (agentic RAG) en vez de inyectar contexto siempre; ver [RAG](/guia/rag).
+
+Ojo con la nomenclatura: además de las Knowledge Bases clásicas existe la **Managed Knowledge Base de AgentCore** (GA a mediados de 2026), un pipeline RAG totalmente gestionado que el agente consulta **a través del Gateway**, con seis conectores nativos (S3, SharePoint, Confluence, Google Drive, OneDrive y web crawler), almacenamiento vectorial gestionado y búsqueda híbrida.
+
+## De Bedrock Agents a AgentCore
+
+<Callout type="danger" title="Bedrock Agents Classic no es para proyectos nuevos">
+El servicio original **Agents for Amazon Bedrock** (hoy "Classic") **ya no acepta clientes nuevos** y la propia documentación remite a AgentCore. Si heredas agentes Classic, el CLI de AgentCore puede traducirlos a código de Runtime: `agentcore add runtime --agent-id ... --agent-alias-id ... --framework strands`.
+</Callout>
+
+**AgentCore** (GA el 13-10-2025) es un conjunto de servicios modulares: puedes usar solo Runtime, solo Gateway o solo Memory desde un agente que corra en EKS o en otra nube. Es **agnóstico de framework** (ADK, Strands, LangGraph, CrewAI, LlamaIndex, OpenAI Agents SDK) y **de modelo**.
+
+| Componente | Qué resuelve | Estado (oct 2026) |
+|---|---|---|
+| **Runtime** | Hosting serverless con aislamiento por sesión en microVM y ejecuciones largas; CodeZip o contenedor | <Badge tone="ga">GA</Badge> oct 2025 |
+| **Gateway** | APIs OpenAPI, Lambda, Step Functions y servidores MCP como herramientas MCP con auth unificada; *inference targets* hacia proveedores de modelos y passthrough HTTP (A2A, MCP externos) | <Badge tone="ga">GA</Badge> oct 2025 · inference targets jun-jul 2026 · fallback de modelo oct 2026 |
+| **Memory** | Memoria de corto y largo plazo, compartible entre agentes | <Badge tone="ga">GA</Badge> oct 2025 |
+| **Identity** | Identidad de agente, OAuth entrante y saliente (Cognito, Okta, Entra ID, Auth0), bóveda de credenciales | <Badge tone="ga">GA</Badge> oct 2025 |
+| **Code Interpreter** | Sandbox para Python, JavaScript y TypeScript | <Badge tone="ga">GA</Badge> oct 2025 |
+| **Browser** | Navegador gestionado (Playwright, BrowserUse) | <Badge tone="ga">GA</Badge> oct 2025 |
+| **Observability** | Trazas OpenTelemetry en CloudWatch | <Badge tone="ga">GA</Badge> oct 2025 |
+| **Policy** | Reglas deterministas (Cedar o lenguaje natural) sobre cada tool call en el Gateway; integra Guardrails | <Badge tone="ga">GA</Badge> 03-03-2026 |
+| **Evaluations** | Evaluación online sobre trazas de producción, on-demand y batch | <Badge tone="ga">GA</Badge> 31-03-2026 |
+| **Harness** | Loop de agente gestionado sin contenedor (`CreateHarness` / `InvokeHarness`) | <Badge tone="ga">GA</Badge> jun 2026 |
+| **Registry** (AWS Agent Registry) | Catálogo gobernado de agentes, servidores MCP y skills, con auto-descubrimiento en AWS Organizations | <Badge tone="ga">GA</Badge> ago 2026 |
+| **Payments** | Micropagos x402 para agentes | <Badge tone="ga">GA</Badge> ago 2026 |
+| **Managed Knowledge Base** | RAG gestionado vía Gateway | <Badge tone="ga">GA</Badge> jun-jul 2026 |
+
+El **Harness** merece una mención: declaras modelo, prompt, herramientas y memoria en configuración y AgentCore ejecuta el loop por ti. Es el equivalente a los "prompt agents" de otras nubes y puede exportarse a código Strands cuando necesites más control.
+
+## Cómo fluye una petición en AgentCore
+
+Este es el recorrido de una solicitud de reembolso en un portal de soporte, tocando cada servicio:
+
+<Diagram id="aws-agentcore-arquitectura" height={520} />
+
+Fíjate en dos decisiones de diseño. Primero, **Policy vive en el Gateway, no en el agente**: aunque el modelo sea manipulado por una inyección de prompt, la regla Cedar sigue rechazando el reembolso fuera de política. Segundo, **Identity custodia las credenciales salientes**: el código del agente nunca ve el token del CRM.
+
+## Runtime: protocolos y contrato
+
+Runtime no impone framework, pero sí un **contrato de servicio**. Tu contenedor (o CodeZip) debe exponer uno de estos protocolos:
+
+| Protocolo | Puerto | Ruta | Formato | Uso típico |
+|---|---|---|---|---|
+| **HTTP** | 8080 | `/invocations` (y `/ws` para WebSocket) | JSON / SSE | Agente invocado por tu app; el caso más común |
+| **MCP** | 8000 | `/mcp` | JSON-RPC | Publicar un servidor de herramientas MCP gestionado |
+| **A2A** | 9000 | `/` | JSON-RPC 2.0 + Agent Card | Agente que otros agentes descubren y delegan tareas |
+| **AG-UI** | 8080 | `/invocations` (SSE) o `/ws` | Stream de eventos | Frontends interactivos (CopilotKit) |
+
+La autenticación de entrada es SigV4 u OAuth 2.0 (JWT) en todos los casos. Desde octubre de 2026 también puedes configurar el puerto y la ruta de invocación, y abrir **session endpoints** con `allowedPorts` para servidores adicionales dentro de la sesión.
+
+## Del código al despliegue
+
+El **AgentCore CLI** (paquete npm `@aws/agentcore`, v1.0 en octubre de 2026) reemplaza al antiguo *starter toolkit* de Python. El flujo básico:
+
+<Steps>
+
+1. **Instala** el CLI: `npm install -g @aws/agentcore` (requiere Node.js 20.12+, Python 3.10+ y `uv`). Si tenías `bedrock-agentcore-starter-toolkit` por pip, desinstálalo: en Windows suele tapar al comando nuevo.
+2. **Crea** el proyecto: `agentcore create --name SoporteRetail --template agent-python-strands`. Genera el código, un recurso de Memory y una app CDK. Sin `--template`, el asistente interactivo crea un Harness.
+3. **Prueba en local**: `agentcore dev --mode browser` levanta el Runtime con hot reload y abre el *agent inspector* con trazas locales.
+4. **Despliega**: `agentcore build` valida y empaqueta; `agentcore deploy` aprovisiona con CDK el Runtime, sus endpoints y la observabilidad en CloudWatch.
+5. **Invoca**: `agentcore invoke --runtime agent --payload '{"prompt":"¿Dónde está mi pedido 4512?"}'`. Luego `agentcore logs runtime` y `agentcore traces runtime list` para depurar.
+
+</Steps>
+
+Las plantillas oficiales cubren Strands, LangChain y Vercel AI SDK; para **Google ADK** se usa `agentcore add runtime` con tu propio código, envolviendo el `Runner` de ADK con `BedrockAgentCoreApp`, como en el sample oficial de `awslabs/agentcore-samples`:
+
+<CodeTabs labels={["Google ADK", "Strands"]}>
+
+```python title="app/agent/main.py"
+from bedrock_agentcore.runtime import BedrockAgentCoreApp
+from google.adk.agents import LlmAgent
+from google.adk.models.lite_llm import LiteLlm
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.genai import types
+
+def consultar_pedido(order_id: str) -> dict:
+    """Devuelve estado y fecha estimada de un pedido."""
+    return {"order_id": order_id, "estado": "en ruta", "eta": "2026-11-04"}
+
+agent = LlmAgent(
+    name="soporte_retail",
+    model=LiteLlm(model="bedrock/global.anthropic.claude-sonnet-5-5"),  # litellm>=1.84
+    instruction="Atiendes consultas de pedidos. Usa herramientas; no inventes datos.",
+    tools=[consultar_pedido],
+)
+sessions = InMemorySessionService()   # vive en la microVM de la sesión; usa AgentCore Memory para persistir
+runner = Runner(agent=agent, app_name="soporte", session_service=sessions)
+app = BedrockAgentCoreApp()
+
+@app.entrypoint
+async def invoke(payload, context):
+    uid, sid = payload.get("user_id", "anon"), context.session_id
+    if not await sessions.get_session(app_name="soporte", user_id=uid, session_id=sid):
+        await sessions.create_session(app_name="soporte", user_id=uid, session_id=sid)
+    msg = types.Content(role="user", parts=[types.Part(text=payload["prompt"])])
+    respuesta = ""
+    async for event in runner.run_async(user_id=uid, session_id=sid, new_message=msg):
+        if event.is_final_response() and event.content and event.content.parts:
+            respuesta = event.content.parts[0].text
+    return {"result": respuesta}
+
+if __name__ == "__main__":
+    app.run()   # sirve POST /invocations y GET /ping en el puerto 8080
+```
+
+```python title="app/agent/main.py"
+from bedrock_agentcore.runtime import BedrockAgentCoreApp
+from strands import Agent, tool
+
+@tool
+def consultar_pedido(order_id: str) -> dict:
+    """Devuelve estado y fecha estimada de un pedido."""
+    return {"order_id": order_id, "estado": "en ruta", "eta": "2026-11-04"}
+
+agent = Agent(
+    model="global.anthropic.claude-sonnet-5-5",
+    system_prompt="Atiendes consultas de pedidos. No inventes datos.",
+    tools=[consultar_pedido],
+)
+app = BedrockAgentCoreApp()
+
+@app.entrypoint
+def invoke(payload):
+    return {"result": str(agent(payload.get("prompt")))}
+
+if __name__ == "__main__":
+    app.run()
+```
+
+</CodeTabs>
+
+<Callout type="info" title="Verifica contra el sample">
+El esqueleto ADK sigue el patrón del sample oficial (`Runner` + `@app.entrypoint`). Los detalles como `context.session_id` o la firma asíncrona del entrypoint pueden variar entre versiones del SDK `bedrock-agentcore`; contrástalos con el sample antes de copiarlo a producción.
+</Callout>
+
+## Decisiones y trade-offs
+
+| Decisión | Opción A | Opción B | Criterio |
+|---|---|---|---|
+| Endpoint de inferencia | `bedrock-runtime` (Converse) | `bedrock-mantle` | Runtime si necesitas Guardrails o perfiles entre regiones; Mantle solo para tools server-side, background o Projects |
+| Alcance del perfil | `global.` | `us.` / `eu.` | Global por costo y capacidad; geográfico si hay residencia de datos |
+| Dónde ejecutar el agente | AgentCore Runtime | ECS/EKS/Lambda propios | Runtime te da aislamiento por sesión, auth y observabilidad listos; EKS si ya tienes plataforma y necesitas control fino |
+| Código o configuración | Runtime con framework | Harness | Harness para agentes simples y rápidos; código cuando hay orquestación propia |
+| Acceso a modelos | Directo a Bedrock | Vía AI gateway (LiteLLM, Gateway inference targets) | Gateway si hay multi-proveedor, presupuestos por equipo o fallback entre modelos |
+| Vector store | S3 Vectors | OpenSearch | Costo vs. búsqueda híbrida y latencia |
+
+## Errores comunes
+
+<Callout type="warning" title="Usar el ID base del modelo">
+`modelId="anthropic.claude-sonnet-5-5"` falla con los Claude recientes. Usa siempre el perfil (`global.anthropic.claude-sonnet-5-5`), también en LiteLLM (`bedrock/global.anthropic...`) y en la configuración de los frameworks.
+</Callout>
+
+<Callout type="warning" title="Caché que nunca acierta">
+Si pones datos variables (fecha, nombre del usuario) **antes** del `cachePoint`, el prefijo cambia en cada petición y pagas escrituras de caché sin lecturas. Lo estático primero; lo dinámico después del checkpoint. Vigila `cacheReadInputTokens` en tus métricas.
+</Callout>
+
+<Callout type="tip" title="Gobierna en el Gateway, no en el prompt">
+Las reglas de negocio críticas ("no reembolsar más de X sin aprobación") deben vivir en **AgentCore Policy** o en la propia API, no en el system prompt. El prompt orienta; la política garantiza.
+</Callout>
+
+<KeyPoints>
+
+- **Bedrock = modelos** (Converse, perfiles, caché, Guardrails, KB); **AgentCore = operación de agentes** (Runtime, Gateway, Memory, Identity, Policy, Observability, Evaluations).
+- Los Claude recientes se invocan **solo vía perfil de inferencia**; IAM debe permitir el modelo en **todas las regiones destino**.
+- `cachePoint` con `ttl: "1h"` abarata y acelera agentes de varios turnos; mide los tokens leídos de caché.
+- `ApplyGuardrail` aplica la misma política de contenido a **cualquier** modelo, dentro o fuera de AWS.
+- **No uses Bedrock Agents Classic** en proyectos nuevos: AgentCore es agnóstico de framework y corre ADK sin problemas.
+
+</KeyPoints>
+
+## Siguientes pasos
+
+<Cards cols={3}>
+  <Card title="Arquitectura ADK + gateway + Bedrock" tag="referencia" href="/guia/arquitectura-adk-gateway-bedrock">La arquitectura completa del lector de referencia, de extremo a extremo.</Card>
+  <Card title="Gateways" tag="conectar" href="/guia/gateways">LLM gateway vs. tool gateway, LiteLLM y AgentCore Gateway.</Card>
+  <Card title="Google ADK" tag="framework" href="/guia/google-adk">El framework que desplegarás en AgentCore Runtime.</Card>
+  <Card title="Google Agent Platform" tag="plataforma" href="/guia/google-agent-platform">El equivalente en Google Cloud, para comparar.</Card>
+  <Card title="Seguridad y gobernanza" tag="producción" href="/guia/seguridad-gobernanza">Identidad, mínimo privilegio, Policy y guardrails en capas.</Card>
+  <Card title="Evaluación y observabilidad" tag="producción" href="/guia/evaluacion-observabilidad">Trazas OTel y AgentCore Evaluations.</Card>
+</Cards>

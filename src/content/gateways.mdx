@@ -1,0 +1,226 @@
+Un **AI gateway** es un proxy que se interpone entre tus agentes y los servicios que consumen, para **centralizar acceso, control y visibilidad**. En 2026 conviven dos familias que se están fusionando:
+
+- **LLM gateways** (agente ↔ proveedores de modelos): una API unificada hacia Bedrock, Gemini, Foundry, OpenAI o Anthropic, con claves virtuales, presupuestos, límites, fallbacks, caché y registro de costos.
+- **Tool / MCP gateways** (agente ↔ herramientas): un catálogo de herramientas expuesto como endpoint MCP, con OAuth hacia cada sistema, políticas por llamada y auditoría.
+
+Sin gateway, cada equipo guarda sus propias claves de proveedor, nadie sabe cuánto gasta cada agente, un throttling de Bedrock tumba producción y cada agente se conecta a su manera a cada sistema interno. Con gateway, todo eso se resuelve **una vez**, en un punto.
+
+## Por qué un gateway en una empresa
+
+<Cards cols={3}>
+  <Card title="Claves centralizadas" tag="seguridad">
+    Las credenciales reales (roles IAM, API keys de proveedores) viven solo en el gateway. Los agentes reciben **claves virtuales** revocables por equipo o aplicación.
+  </Card>
+  <Card title="Presupuestos y límites" tag="FinOps">
+    Presupuesto mensual por clave o equipo, límites de tokens y requests por minuto, y reportes de gasto para *showback/chargeback*.
+  </Card>
+  <Card title="Fallbacks y resiliencia" tag="disponibilidad">
+    Reintentos, *cooldown* de despliegues que fallan y fallback a otra región, cuenta o proveedor sin tocar el código del agente.
+  </Card>
+  <Card title="Observabilidad" tag="operación">
+    Cada llamada con equipo, modelo, tokens, latencia y costo, exportable a Langfuse, OpenTelemetry o tu SIEM.
+  </Card>
+  <Card title="Gobierno de datos" tag="cumplimiento">
+    Qué modelos puede usar cada equipo, en qué regiones (residencia de datos), con qué guardrails y qué se registra.
+  </Card>
+  <Card title="Portabilidad" tag="arquitectura">
+    Cambiar de modelo o de proveedor es un cambio de configuración en el gateway, no un despliegue de cada agente.
+  </Card>
+</Cards>
+
+## LLM gateway: cómo funciona
+
+<Diagram id="gateways-llm" height={600} />
+
+### Ejemplo: LiteLLM Proxy delante de Bedrock
+
+**LiteLLM Proxy** es el gateway open source más usado en el ecosistema ADK porque ADK no trae un conector nativo para Bedrock y usa LiteLLM para llegar a él. Desplegado como servicio, entrega una API compatible con OpenAI, claves virtuales (persistidas en Postgres), presupuestos, límites tpm/rpm, fallbacks y un **gateway MCP**.
+
+<Callout type="danger" title="Alerta de seguridad: LiteLLM 1.82.7 y 1.82.8">
+Las versiones **1.82.7 y 1.82.8** publicadas en PyPI contuvieron **código no autorizado** (incidente del 24 de marzo de 2026). La documentación de ADK pide fijar **`litellm>=1.84`**. Si alguna vez instalaste esas versiones (en un laptop, una imagen de contenedor o un pipeline de CI), **rota todas las credenciales** a las que ese entorno tuvo acceso y fija versiones con hash en tus dependencias.
+</Callout>
+
+```yaml title="config.yaml"
+model_list:
+  - model_name: claude-sonnet                  # alias que ven los agentes
+    litellm_params:
+      model: bedrock/global.anthropic.claude-sonnet-5-5   # perfil de inferencia global
+      aws_region_name: us-east-1               # credenciales: rol IAM de la tarea ECS
+  - model_name: claude-sonnet-eu
+    litellm_params:
+      model: bedrock/eu.anthropic.claude-sonnet-5-5
+      aws_region_name: eu-west-1
+      aws_role_name: arn:aws:iam::222233334444:role/litellm-bedrock   # otra cuenta, otra cuota
+      aws_session_name: litellm-gw
+  - model_name: claude-haiku
+    litellm_params:
+      model: bedrock/global.anthropic.claude-haiku-5-5
+
+litellm_settings:
+  num_retries: 2                               # reintentos sobre el mismo alias
+
+router_settings:
+  fallbacks: [{"claude-sonnet": ["claude-sonnet-eu", "claude-haiku"]}]
+  allowed_fails: 3                             # tras 3 fallos, el despliegue entra en cooldown
+  cooldown_time: 30                            # segundos fuera de rotación
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY    # solo para administrar, nunca para agentes
+  database_url: os.environ/DATABASE_URL        # Postgres: claves, equipos y gasto
+
+mcp_servers:                                   # el mismo proxy como gateway MCP
+  tickets:
+    url: "https://mcp-tickets.interno/mcp"
+    transport: "http"
+    description: "Sistema de tickets de postventa"
+    auth_type: "api_key"
+    auth_value: os.environ/TICKETS_MCP_KEY
+```
+
+<Callout type="warning" title="Fallback entre geografías = decisión de cumplimiento">
+Pasar de `global.` o `us.` a `eu.` (o a otro proveedor) cambia **dónde se procesan los datos**. Si tienes requisitos de residencia, limita los fallbacks a la misma geografía y usa cuotas en otra cuenta o un modelo más pequeño de la misma familia. Recuerda que, para los perfiles cross-region, IAM y las SCP deben permitir **todas las regiones destino** del perfil.
+</Callout>
+
+Con el proxy arriba, el equipo de plataforma emite una clave virtual por agente o equipo:
+
+```bash title="crear-clave.sh"
+curl -X POST https://ai-gateway.interno/key/generate \
+  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "key_alias": "agente-ventas-prod",
+        "models": ["claude-sonnet", "claude-haiku"],
+        "max_budget": 500,
+        "budget_duration": "30d",
+        "tpm_limit": 200000,
+        "rpm_limit": 120,
+        "metadata": {"equipo": "ventas", "centro_costo": "CC-4410"}
+      }'
+# → {"key": "sk-...", ...}  guárdala en Secrets Manager, nunca en el repo
+```
+
+Y el agente ADK solo conoce el alias y su clave virtual:
+
+```python title="agent.py"
+# pip install google-adk "litellm>=1.84"
+import os
+from google.adk.agents import LlmAgent
+from google.adk.models.lite_llm import LiteLlm
+
+root_agent = LlmAgent(
+    name="asistente_ventas",
+    model=LiteLlm(
+        model="litellm_proxy/claude-sonnet",          # alias del gateway, no el id de Bedrock
+        api_base="https://ai-gateway.interno",
+        api_key=os.environ["LITELLM_VIRTUAL_KEY"],    # clave virtual con presupuesto propio
+    ),
+    instruction="Ayudas al equipo comercial con cotizaciones y disponibilidad.",
+)
+```
+
+El agente nunca ve credenciales de AWS. Si mañana el alias `claude-sonnet` apunta a otra versión, otra cuenta u otro proveedor, el agente no cambia. Para Strands, LangGraph u otros frameworks el patrón es el mismo: cualquier cliente compatible con OpenAI apuntando al gateway.
+
+### La versión "enterprise" en AWS
+
+AWS publica la arquitectura de referencia **Multi-Provider Generative AI Gateway**: LiteLLM en **ECS o EKS** detrás de un **ALB con WAF**, **RDS** para claves y gasto, **Secrets Manager** para credenciales de proveedores y la posibilidad de aplicar **Bedrock Guardrails** (`ApplyGuardrail`) también a modelos que no son de Bedrock. Es un buen punto de partida si vas a operar LiteLLM tú mismo.
+
+### Qué medir en un LLM gateway
+
+Un gateway sin tableros es solo un proxy más. Estas son las métricas que conviene exponer desde el primer día, idealmente por clave, equipo y modelo:
+
+| Métrica | Para qué sirve | Señal de alerta |
+|---|---|---|
+| Gasto acumulado vs. presupuesto | FinOps, showback por equipo | Un agente consume 3× su media diaria |
+| Tokens de entrada/salida por request | Detectar contexto inflado o loops | Crecimiento sostenido del input por request |
+| Tasa de errores 429/5xx del proveedor | Salud de cuotas y regiones | Throttling recurrente en horario punta |
+| Tasa de fallback | Cuánto tráfico sirve el modelo secundario | Más de un pequeño porcentaje sostenido |
+| Latencia p50/p95 y tiempo al primer token | Experiencia de usuario | p95 por encima del SLO del agente |
+| Tasa de aciertos de caché (si aplica) | Ahorro real | Caché activa sin aciertos: revisa la clave |
+
+La **tasa de fallback** merece atención especial: si sube, tu agente está respondiendo con un modelo distinto del que evaluaste. Correlaciónala con las métricas de calidad de [Evaluación y observabilidad](/guia/evaluacion-observabilidad) y trata un fallback prolongado como un incidente, no como un éxito de la resiliencia.
+
+## Tool / MCP gateway: cómo funciona
+
+El segundo tipo de gateway se ocupa de las **herramientas**. Los problemas que resuelve son distintos: no hay tokens que presupuestar, pero sí **identidades, permisos por herramienta, credenciales hacia decenas de sistemas y auditoría** de cada acción.
+
+<Diagram id="gateways-mcp" height={600} />
+
+Funciones típicas de un tool gateway:
+
+<Steps>
+
+1. **Agregación**: varias fuentes (APIs con OpenAPI, Lambdas, servidores MCP propios y de SaaS) bajo **un único endpoint MCP**.
+2. **Autenticación entrante**: valida el token OAuth del agente o del usuario (el gateway actúa como *resource server* MCP).
+3. **Credenciales salientes**: obtiene y guarda los tokens hacia cada sistema; el agente nunca los ve (sin *token passthrough*).
+4. **Políticas por llamada**: reglas deterministas sobre herramienta y argumentos, evaluadas fuera del modelo.
+5. **Filtrado del catálogo**: cada identidad ve solo las herramientas que puede usar, lo que además ahorra contexto.
+6. **Auditoría y trazas**: quién llamó qué, con qué argumentos y qué decidió la política.
+
+</Steps>
+
+La spec MCP `2026-07-28` ayuda directamente a este tipo de gateway: los headers obligatorios **`Mcp-Method`** y **`Mcp-Name`** permiten enrutar y aplicar políticas **sin parsear el body JSON-RPC**, y al ser stateless no se necesita afinidad de sesión (ver [MCP](/guia/mcp)).
+
+**AgentCore Gateway** es el ejemplo gestionado en AWS: convierte APIs, OpenAPI, Lambda, Step Functions y servidores MCP en herramientas MCP con autenticación unificada (Cognito, Okta, Entra ID, Auth0 vía AgentCore Identity), y se combina con **AgentCore Policy** (GA desde marzo de 2026), que evalúa reglas escritas en lenguaje natural o en **Cedar** sobre cada llamada a herramienta.
+
+## La convergencia de 2026
+
+La frontera entre ambas familias se está borrando:
+
+- **LiteLLM**, **Kong**, **Portkey** y **Agent Router** nacieron como LLM gateways y hoy incluyen gateway MCP.
+- **AgentCore Gateway** nació como tool gateway y desde mediados de 2026 acepta **inference targets** (modelos como destino), con fallback de modelo agregado en octubre de 2026.
+- **Google Agent Gateway** (GA junio de 2026) gobierna el tráfico de agentes y herramientas dentro de Gemini Enterprise Agent Platform, mientras **Apigee** sigue siendo la pieza de gestión de APIs, con conector `ApigeeLlm` en ADK.
+
+La consecuencia práctica: puedes empezar con **un solo producto para ambos tipos de tráfico** si tu escala es moderada, y separarlos cuando los equipos responsables (FinOps vs. seguridad de integraciones) o los requisitos lo pidan.
+
+## Comparativa (octubre de 2026)
+
+| Gateway | Tipo | Modelo de despliegue | Puntos clave |
+|---|---|---|---|
+| **LiteLLM Proxy** | LLM + MCP | OSS autoalojado | Claves virtuales (Postgres), `max_budget`, tpm/rpm, fallbacks, Bedrock nativo, MCP con permisos por clave/equipo. Fija `>=1.84` |
+| **Cloudflare AI Gateway** | LLM | SaaS (edge) | Analítica, logs, caché, rate limiting, reintentos y fallback; 24 proveedores, incluido Bedrock |
+| **Vercel AI Gateway** | LLM | SaaS | API compatible OpenAI/Anthropic, fallbacks, presupuestos, BYOK, sin recargo sobre el precio del proveedor |
+| **Kong AI Gateway** | LLM + MCP | OSS / enterprise | Plugins sobre Kong; `ai-mcp-proxy`, caché semántica; natural si ya usas Kong |
+| **Portkey** | LLM + MCP | SaaS / OSS (desde marzo de 2026) | Ruteo, guardrails y observabilidad; adquirida por Palo Alto Networks en 2026 (según fuentes secundarias) |
+| **Agent Router** (ex Envoy AI Gateway) | LLM + MCP | OSS en Kubernetes | Proyecto de la AAIF sobre Envoy; 22+ proveedores; rate limit por tokens |
+| **AWS Multi-Provider GenAI Gateway** | Arquitectura de referencia | Tu cuenta AWS | LiteLLM en ECS/EKS + ALB/WAF + RDS + Secrets Manager; Guardrails para cualquier proveedor |
+| **AgentCore Gateway** | Tools/MCP (+ inferencia) | Gestionado AWS | APIs/Lambda/OpenAPI/MCP → MCP; Identity; Policy con Cedar; inference targets |
+| **Docker MCP Gateway** | MCP | Local / autoalojado | `docker mcp gateway run`; cada servidor MCP en un contenedor aislado |
+| **Google Agent Gateway / Apigee** | Agentes y tools / APIs y LLM | Gestionado GCP | Agent Gateway GA junio de 2026; Apigee con conector `ApigeeLlm` en ADK |
+
+## Guía de decisión
+
+| Si tu situación es… | Considera… |
+|---|---|
+| ADK + Bedrock en AWS, varios equipos, necesitas presupuestos | **LiteLLM Proxy** autoalojado siguiendo la arquitectura de referencia de AWS |
+| Herramientas internas en AWS que deben exponerse a agentes con políticas | **AgentCore Gateway + Policy** (y AgentCore Identity para OAuth) |
+| Multi-cloud y Kubernetes como plataforma común | **Agent Router** o **Kong**, para LLM y MCP en la misma capa |
+| Equipo pequeño, quieres cero operación | **Cloudflare AI Gateway**, **Vercel AI Gateway** o Portkey SaaS (revisa residencia de datos) |
+| Todo en Google Cloud | **Agent Gateway** + **Apigee**; ADK con conector `ApigeeLlm` |
+| Desarrolladores usando servidores MCP locales de terceros | **Docker MCP Gateway** para aislarlos en contenedores |
+
+<Callout type="tip" title="Buenas prácticas">
+- **Una clave virtual por agente y entorno** (`ventas-dev`, `ventas-prod`), nunca la master key en un agente.
+- Define **aliases estables** (`claude-sonnet`) y cambia el modelo detrás con control de versiones y evals.
+- Fallbacks **evaluados**: si el modelo alternativo no pasó tus evals, no es un fallback, es un incidente silencioso.
+- Alertas por presupuesto (50 %, 80 %, 100 %) antes de que el corte llegue a producción.
+- El gateway es infraestructura crítica: **alta disponibilidad**, versiones fijadas y escaneo de la cadena de suministro.
+- No registres prompts completos con datos sensibles sin política de retención y enmascaramiento.
+</Callout>
+
+<KeyPoints>
+
+- **LLM gateway** = acceso a modelos (claves virtuales, presupuestos, límites, fallbacks, costos). **Tool gateway** = acceso a herramientas (OAuth, políticas, auditoría).
+- En 2026 convergen: LiteLLM, Kong, Portkey y Agent Router hacen MCP; AgentCore Gateway acepta inference targets.
+- Patrón de referencia del lector: **ADK → `LiteLlm("litellm_proxy/…")` → LiteLLM Proxy → Bedrock `global.`**, con fallback a otra cuenta/región o a un modelo menor.
+- **LiteLLM 1.82.7/1.82.8 comprometidas**: usa `>=1.84` y rota credenciales si estuvieron instaladas.
+- Los fallbacks entre geografías o proveedores son decisiones de **cumplimiento**, no solo técnicas.
+
+</KeyPoints>
+
+## Siguientes pasos
+
+<Cards cols={3}>
+  <Card title="Arquitectura ADK + gateway + Bedrock" href="/guia/arquitectura-adk-gateway-bedrock">El patrón completo desplegado de punta a punta.</Card>
+  <Card title="AWS Bedrock y AgentCore" href="/guia/aws-bedrock-agentcore">Perfiles de inferencia, Gateway, Identity y Policy en detalle.</Card>
+  <Card title="Seguridad y gobernanza" href="/guia/seguridad-gobernanza">Identidad de agentes, mínimo privilegio y auditoría.</Card>
+</Cards>

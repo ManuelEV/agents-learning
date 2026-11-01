@@ -1,0 +1,480 @@
+**Google Agent Development Kit (ADK)** es un framework open source para construir, evaluar y desplegar agentes, desde un asistente con un par de herramientas hasta sistemas multiagente con flujos deterministas. Está optimizado para Gemini y el ecosistema de Google Cloud, pero es **agnóstico de modelo y de despliegue**: puedes usar Claude en Amazon Bedrock a través de LiteLLM y correr el agente en AWS. Esa combinación (ADK + AI gateway + Bedrock) es justamente la que usa el lector de referencia de esta guía, así que esta página va a fondo.
+
+## Estado del proyecto (octubre de 2026)
+
+ADK tuvo un 2026 intenso: llegó la versión 2.0 con **workflows en grafo**, se sumaron lenguajes y la documentación cambió de casa.
+
+| Lenguaje | Paquete | Estado a octubre de 2026 |
+|---|---|---|
+| Python | `pip install google-adk` | **2.13.0** (23-10-2026). ADK 2.0 GA el 19-05-2026. Línea 1.x en mantenimiento (1.39.1) |
+| TypeScript | `npm install @google/adk` | 2.x. ADK 2.0 GA el 21-08-2026 |
+| Go | `google.golang.org/adk/v2` | 2.x. ADK 2.0 GA el 30-06-2026 |
+| Java | `com.google.adk:google-adk` | Disponible; sin grafos 2.0 a la fecha |
+| Kotlin | (ver docs) | Disponible; sin grafos 2.0 a la fecha |
+
+<Callout type="info" title="La documentación se mudó a adk.dev">
+`google.github.io/adk-docs` redirige (301) a **https://adk.dev/**. Si encuentras tutoriales con la URL antigua, el contenido conceptual suele seguir vigente, pero revisa siempre la versión: muchos ejemplos de 2025 usan APIs de 1.x. En paralelo, Vertex AI pasó a llamarse **Gemini Enterprise Agent Platform** (Cloud Next '26, abril de 2026) y *Agent Engine* ahora es **Agent Runtime**.
+</Callout>
+
+El cambio más importante de 2.0 es arquitectónico: `BaseAgent` ahora hereda de `BaseNode`, de modo que **un agente es un nodo más** dentro de un grafo que también puede contener funciones deterministas. Es un cambio *breaking* para quien escribió agentes personalizados, pero el código típico con `Agent`/`LlmAgent` y herramientas sigue funcionando igual.
+
+## Conceptos clave
+
+<Cards cols={3}>
+  <Card title="LlmAgent" tag="razona">
+    El agente basado en LLM (`Agent` es un alias). Lo defines con `name`, `model`, `instruction`, `description`, `tools` y opcionalmente `sub_agents` y callbacks.
+  </Card>
+  <Card title="Tools" tag="actúa">
+    Funciones Python que ADK envuelve como `FunctionTool` a partir de la firma y el docstring. También `AgentTool`, `McpToolset`, herramientas integradas y OpenAPI.
+  </Card>
+  <Card title="Sessions y state" tag="recuerda">
+    Una sesión es una lista de **eventos** más un diccionario `state`. Prefijos como `user:` o `app:` amplían el alcance del estado.
+  </Card>
+  <Card title="Memory y Artifacts" tag="persiste">
+    `MemoryService` para recordar entre sesiones (búsqueda) y `ArtifactService` para archivos versionados (PDFs, imágenes, CSV).
+  </Card>
+  <Card title="Runner" tag="orquesta">
+    Ejecuta la invocación: carga la sesión, corre el agente y persiste cada evento. Es el puente entre tu app y el agente.
+  </Card>
+  <Card title="Callbacks" tag="controla">
+    Ganchos `before/after` de agente, modelo y herramienta. El lugar para guardrails, caché, políticas y auditoría.
+  </Card>
+</Cards>
+
+### Herramientas: FunctionTool y ToolContext
+
+En ADK, **una función con type hints y docstring es una herramienta**. El framework genera el esquema JSON a partir de la firma; el docstring se convierte en la descripción que lee el modelo, así que escríbelo pensando en el LLM: qué hace, cuándo usarla y qué significan los argumentos.
+
+Si la función declara un parámetro `tool_context: ToolContext`, ADK lo inyecta automáticamente (no aparece en el esquema que ve el modelo). Desde ahí puedes leer y escribir el **estado de la sesión**, guardar artefactos o pedir autenticación.
+
+```python title="soporte/agent.py"
+from google.adk.agents import Agent          # alias de LlmAgent
+from google.adk.tools import ToolContext
+
+def get_order_status(order_id: str) -> dict:
+    """Consulta el estado logístico de un pedido en el ERP.
+
+    Args:
+        order_id: Identificador del pedido, por ejemplo "4512".
+    """
+    # En producción: llamada al ERP o a un servidor MCP interno
+    return {"order_id": order_id, "status": "retrasado", "carrier": "Chilexpress", "eta": "2026-11-04"}
+
+def save_preferred_channel(channel: str, tool_context: ToolContext) -> dict:
+    """Guarda el canal de contacto preferido del cliente (email, whatsapp o teléfono)."""
+    tool_context.state["user:preferred_channel"] = channel   # prefijo user: = persiste entre sesiones del usuario
+    return {"saved": True}
+
+root_agent = Agent(
+    name="soporte_pedidos",
+    model="gemini-flash-latest",
+    description="Resuelve dudas sobre pedidos y entregas.",
+    instruction=(
+        "Eres el agente de soporte de una tienda online. Usa las herramientas; no inventes datos. "
+        "Canal preferido del cliente: {user:preferred_channel?}"   # plantilla leída desde state
+    ),
+    tools=[get_order_status, save_preferred_channel],  # se envuelven como FunctionTool
+)
+```
+
+Las claves de `state` se pueden interpolar en la instrucción con llaves (el `?` indica que es opcional). Para operaciones lentas (aprobaciones, procesos batch) existe `LongRunningFunctionTool`, que permite que la herramienta devuelva un resultado intermedio y el agente continúe cuando llegue el definitivo.
+
+<Callout type="tip" title="Las herramientas son la mitad de la calidad">
+Nombres claros (`get_order_status` mejor que `query`), argumentos tipados, respuestas pequeñas y estructuradas, y errores explícitos (`{"error": "pedido no encontrado"}`) mejoran más la precisión del agente que cambiar de modelo. Ver [patrones de diseño](/guia/patrones-de-diseno) y [context engineering](/guia/context-engineering).
+</Callout>
+
+### Sessions, state, memory y artifacts
+
+ADK separa cuatro tipos de "memoria" que conviene no confundir:
+
+| Concepto | Alcance | Para qué | Implementaciones |
+|---|---|---|---|
+| **Session (eventos)** | Una conversación | Historial que el modelo ve en cada turno | `InMemorySessionService`, `DatabaseSessionService`, Agent Platform Sessions |
+| **State** | Sesión, usuario (`user:`), app (`app:`) o temporal (`temp:`) | Datos estructurados: carrito, idioma, resultados intermedios | Parte de la sesión |
+| **Memory** | Entre sesiones | Recuperar conversaciones o hechos pasados por búsqueda | In-memory, Memory Bank (Agent Platform) |
+| **Artifacts** | Sesión o usuario | Archivos binarios con nombre y versión | In-memory, Cloud Storage |
+
+Un detalle que causa bugs sutiles: **los cambios de estado solo se garantizan cuando el evento que los lleva es procesado por el Runner**. El siguiente diagrama muestra por qué.
+
+## Cómo funciona el runtime
+
+<Diagram id="google-adk-runtime" />
+
+La pieza central es el **event loop**: el agente se ejecuta hasta que tiene algo que reportar (una respuesta, una solicitud de herramienta, un cambio de estado) y entonces emite (`yield`) un `Event`. El Runner recibe el evento, hace *commit* de sus `state_delta` y `artifact_delta` mediante `session_service.append_event(...)`, lo reenvía a la UI y recién entonces el agente continúa. Si lees `state` antes de que el evento se procese, puedes ver cambios aún no confirmados (*dirty reads*); si la invocación falla en ese momento, se pierden.
+
+Así se ejecuta un agente desde tu propio código (por ejemplo, dentro de un endpoint FastAPI):
+
+```python title="run_local.py"
+import asyncio
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.genai import types
+from soporte.agent import root_agent
+
+async def main():
+    session_service = InMemorySessionService()          # en producción: DatabaseSessionService o Agent Platform Sessions
+    runner = Runner(agent=root_agent, app_name="soporte", session_service=session_service)
+    session = await session_service.create_session(app_name="soporte", user_id="cliente-881")
+
+    msg = types.Content(role="user", parts=[types.Part(text="¿Dónde está mi pedido 4512?")])
+    async for event in runner.run_async(user_id="cliente-881", session_id=session.id, new_message=msg):
+        if event.is_final_response():                   # ignora eventos intermedios (tool calls, parciales)
+            print(event.content.parts[0].text)
+
+asyncio.run(main())
+```
+
+<Callout type="warning" title="Verifica contra tu versión">
+El patrón `Runner` + `SessionService` + `run_async` es el documentado desde 1.x y sigue siendo el modelo conceptual del event loop en 2.x, pero no pudimos confirmar en adk.dev cada firma exacta de 2.13. Revisa la referencia de la API de Python antes de copiarlo a producción.
+</Callout>
+
+### La CLI: adk web, adk run y adk api_server
+
+Para desarrollar no necesitas escribir el Runner. ADK espera una carpeta por agente con un `__init__.py` que expone el módulo `agent` (que define `root_agent`), y trae tres comandos:
+
+<Steps>
+
+1. **`adk web`**: levanta la Dev UI en el navegador. Muestra cada evento, las llamadas a herramientas, el `state` y las trazas; es la mejor forma de depurar.
+2. **`adk run soporte`**: conversa con el agente en la terminal. Útil en servidores sin navegador o para pruebas rápidas.
+3. **`adk api_server`**: expone los agentes como API REST (FastAPI). Con `--a2a` también los publica por el protocolo A2A.
+
+</Steps>
+
+## Callbacks: guardrails y políticas en el lugar correcto
+
+Los callbacks te permiten intervenir en seis puntos del ciclo sin tocar la lógica del agente. La regla es simple: en un `before_*`, devolver `None` deja seguir el flujo y devolver un objeto **reemplaza** el paso (un `Content` para el agente, un `LlmResponse` para el modelo, un `dict` para la herramienta).
+
+<Diagram id="google-adk-callbacks" />
+
+Un uso típico en empresa es aplicar reglas de negocio **en código** y no confiar en que el modelo las respete:
+
+```python title="soporte/policies.py"
+from typing import Any, Optional
+from google.adk.agents.callback_context import CallbackContext
+from google.adk.models import LlmRequest, LlmResponse
+from google.adk.tools import BaseTool, ToolContext
+from google.genai import types
+
+MAX_REFUND_USD = 500
+
+def enforce_refund_limit(tool: BaseTool, args: dict[str, Any], tool_context: ToolContext) -> Optional[dict]:
+    """before_tool_callback: bloquea reembolsos sobre el umbral sin aprobación."""
+    if tool.name == "refund_order" and args.get("amount_usd", 0) > MAX_REFUND_USD:
+        tool_context.state["temp:needs_approval"] = True
+        return {"error": f"Reembolsos sobre {MAX_REFUND_USD} USD requieren aprobación de un supervisor."}
+    return None  # None = ejecutar la herramienta normalmente
+
+def block_card_numbers(callback_context: CallbackContext, llm_request: LlmRequest) -> Optional[LlmResponse]:
+    """before_model_callback: no enviar números de tarjeta al modelo."""
+    last = llm_request.contents[-1].parts[0].text or ""
+    if any(len(tok) >= 15 and tok.isdigit() for tok in last.split()):
+        return LlmResponse(content=types.Content(role="model",
+            parts=[types.Part(text="Por seguridad, no compartas números de tarjeta por este canal.")]))
+    return None
+
+# root_agent = Agent(..., before_tool_callback=enforce_refund_limit, before_model_callback=block_card_numbers)
+```
+
+La firma `(tool, args, tool_context)` de `before_tool_callback` es la documentada históricamente; la de `before_model_callback` está confirmada en adk.dev. Para detección robusta de PII usa además un guardrail dedicado (Bedrock Guardrails con `ApplyGuardrail` o Model Armor), como se explica en [seguridad y gobernanza](/guia/seguridad-gobernanza).
+
+## Multiagente: sub_agents, AgentTool y workflows
+
+Cuando un solo agente con muchas herramientas empieza a confundirse, ADK ofrece varias formas de dividir el trabajo. La diferencia clave es **quién conserva el control de la conversación**.
+
+<Diagram id="google-adk-multiagente" />
+
+| Mecanismo | Quién decide | Quién responde al usuario | Cuándo usarlo |
+|---|---|---|---|
+| `sub_agents` + transferencia | El LLM del coordinador (`transfer_to_agent`) | El sub-agente, que toma el control | Especialistas conversacionales (facturación, soporte técnico) |
+| `AgentTool(agent=...)` | El LLM del coordinador | El coordinador (resume el resultado) | Consultas puntuales: búsqueda, análisis, herramientas integradas aisladas |
+| `SequentialAgent` / `ParallelAgent` / `LoopAgent` | Tu código (orden fijo) | El último paso | Pipelines repetibles; en 2.0 (Python/Go) *superseded* por grafos |
+| Grafo `Workflow` (2.0) | Tu código + rutas emitidas por nodos | El nodo final | Procesos con ramas, reintentos, pasos deterministas y HITL |
+| `RemoteA2aAgent` | Igual que un sub-agente | El agente remoto | Agentes de otros equipos o proveedores |
+
+### sub_agents y AgentTool
+
+```python title="soporte/multi.py"
+from google.adk.agents import Agent
+from google.adk.tools.agent_tool import AgentTool
+
+billing = Agent(name="facturacion", model="gemini-flash-latest",
+    description="Cobros duplicados, boletas, notas de crédito.",   # el coordinador decide con esto
+    instruction="Resuelves problemas de facturación. Pide el número de boleta.")
+
+policy_search = Agent(name="buscador_politicas", model="gemini-flash-latest",
+    description="Busca en las políticas comerciales vigentes.",
+    instruction="Responde solo con lo que diga la política, citando la sección.")
+
+root_agent = Agent(
+    name="coordinador", model="gemini-flash-latest",
+    instruction="Atiende al cliente. Deriva facturación al especialista; consulta políticas cuando dudes.",
+    sub_agents=[billing],                       # transferencia: facturacion toma el control
+    tools=[AgentTool(agent=policy_search)],     # herramienta: el coordinador conserva el control
+)
+```
+
+Con `AgentTool(agent=..., skip_summarization=True)` el coordinador devuelve el resultado del sub-agente sin resumirlo con el LLM.
+
+### De los workflow agents al grafo Workflow (ADK 2.0)
+
+En 1.x, los flujos deterministas se armaban anidando `SequentialAgent`, `ParallelAgent` y `LoopAgent`, que comparten datos vía `state` (`output_key` en un agente, `{clave}` en la instrucción del siguiente). En **ADK 2.0** para Python y Go, esos agentes quedan *superseded* por los **graph workflows**: un `Workflow` es un grafo cuyos nodos pueden ser agentes, funciones Python o sub-workflows, y **el valor de retorno de un nodo es la entrada del siguiente**, sin pasar por `state`. En TypeScript los workflow agents están deprecados pero funcionan, y TS también soporta grafos desde 2.0.
+
+```python title="devoluciones/agent.py"
+from google.adk import Workflow, Event
+from google.adk.agents import Agent
+
+classifier = Agent(name="clasificador", model="gemini-flash-latest",
+    instruction="Clasifica la solicitud como DEVOLUCION o RECLAMO. Responde solo la etiqueta.")
+returns_agent = Agent(name="devoluciones", model="gemini-flash-latest",
+    instruction="Genera la etiqueta de devolución y explica los pasos al cliente.")
+
+def router(node_input: str):
+    """Nodo determinista: enruta según la etiqueta del clasificador."""
+    return Event(route="DEVOLUCION" if "DEVOLUCION" in node_input.upper() else "RECLAMO")
+
+def open_ticket(node_input: str):
+    """Los reclamos no los resuelve el LLM: se abre un ticket en el CRM."""
+    return Event(output="Reclamo registrado. Un ejecutivo te contactará en 24 h.")
+
+root_agent = Workflow(
+    name="postventa",
+    edges=[
+        ("START", classifier, router),                                   # secuencia
+        (router, {"DEVOLUCION": returns_agent, "RECLAMO": open_ticket}), # rutas
+    ],
+)
+```
+
+Los grafos 2.0 también soportan **human-in-the-loop** (pausar un nodo hasta recibir input humano) y `RetryConfig` por nodo; los detalles están en la sección *Graphs* de adk.dev. Además existen *dynamic workflows* (control de flujo en código Python normal) y *collaborative workflows* (un coordinador dinámico sobre un conjunto de sub-agentes). Para una comparación de estos estilos con LangGraph, ver [LangGraph](/guia/langgraph) y [orquestación avanzada](/guia/orquestacion-avanzada).
+
+## Multimodelo: Claude en Bedrock vía LiteLLM
+
+ADK acepta strings directos para Gemini y para los modelos del catálogo de Agent Platform (incluido Claude allí). Para otros proveedores trae conectores: **LiteLLM**, Apigee (`ApigeeLlm`), Ollama, vLLM y LiteRT-LM. ADK **no documenta Bedrock explícitamente**; la integración funciona porque LiteLLM soporta Bedrock de forma nativa. Hay dos formas de hacerlo.
+
+<CodeTabs labels={["A · LiteLlm embebido", "B · Proxy LiteLLM (recomendado)", "config.yaml del proxy"]}>
+
+```python title="agent_bedrock.py"
+# pip install google-adk "litellm>=1.84" boto3
+import os
+from google.adk.agents import LlmAgent
+from google.adk.models.lite_llm import LiteLlm
+
+os.environ["AWS_REGION_NAME"] = "us-east-1"   # credenciales: cadena estándar de boto3 (rol IAM)
+
+root_agent = LlmAgent(
+    name="asistente_finanzas",
+    # Perfil de inferencia global: Claude reciente exige inference profile, no el ID base
+    model=LiteLlm(model="bedrock/global.anthropic.claude-sonnet-5-5"),
+    instruction="Eres un asistente del área de finanzas. Responde en español y cita tus fuentes.",
+    tools=[],
+)
+```
+
+```python title="agent_gateway.py"
+from google.adk.agents import LlmAgent
+from google.adk.models.lite_llm import LiteLlm
+
+root_agent = LlmAgent(
+    name="asistente_finanzas",
+    # El agente solo conoce un alias y una clave virtual; nunca ve credenciales de AWS
+    model=LiteLlm(
+        model="litellm_proxy/claude-sonnet",
+        api_base="https://ai-gateway.interno",
+        api_key="sk-<virtual-key-del-equipo>",   # en producción: desde Secrets Manager
+    ),
+    instruction="Eres un asistente del área de finanzas.",
+)
+```
+
+```yaml title="litellm-proxy/config.yaml"
+model_list:
+  - model_name: claude-sonnet            # alias que usan los agentes
+    litellm_params:
+      model: bedrock/global.anthropic.claude-sonnet-5-5
+      aws_region_name: os.environ/AWS_REGION_NAME
+  - model_name: claude-sonnet            # mismo alias: fallback/balanceo a otro perfil
+    litellm_params:
+      model: bedrock/eu.anthropic.claude-sonnet-5-5
+      aws_region_name: eu-west-1
+```
+
+</CodeTabs>
+
+Puntos a tener en cuenta:
+
+- **Perfiles de inferencia**: los Claude recientes en Bedrock se invocan con un *inference profile* (`global.`, `us.`, `eu.`). Usar el ID base `anthropic.claude-sonnet-5-5` devuelve un error 400. Elige `global.` por disponibilidad o un perfil geográfico si tienes requisitos de residencia de datos.
+- **IAM mínimo**: `bedrock:InvokeModel` y `bedrock:InvokeModelWithResponseStream` sobre el ARN del perfil **y** sobre los foundation models en todas las regiones a las que el perfil puede enrutar.
+- **Formatos de LiteLLM**: `bedrock/<model-o-perfil>` o `bedrock/converse/<model>` para forzar la Converse API. Autenticación por la cadena de boto3 o con `AWS_BEARER_TOKEN_BEDROCK`.
+- **Proxy como AI gateway**: la opción B centraliza claves virtuales, presupuestos por equipo, rate limits, fallbacks entre regiones y logs de costo. El patrón completo está en [gateways](/guia/gateways) y en la [arquitectura ADK + gateway + Bedrock](/guia/arquitectura-adk-gateway-bedrock).
+
+<Callout type="danger" title="Seguridad de la cadena de suministro: litellm>=1.84">
+Las versiones **1.82.7 y 1.82.8** de LiteLLM publicadas en PyPI el 24-03-2026 contenían código no autorizado. La documentación de ADK exige `litellm>=1.84` y pide **rotar secretos y credenciales** si instalaste o actualizaste LiteLLM en ese período (esto también afecta a los extras `eval` y `extensions` de ADK). Fija versiones con hashes en tus lockfiles y escanea dependencias en CI.
+</Callout>
+
+## MCP y A2A
+
+### Herramientas MCP con McpToolset
+
+`McpToolset` conecta el agente a un servidor MCP y convierte sus herramientas en herramientas ADK. Soporta transporte **stdio** (subproceso local) y **Streamable HTTP** (servidor remoto), con `tool_filter` para exponer solo lo necesario, una práctica clave de mínimo privilegio.
+
+```python title="soporte/mcp_tools.py"
+import os
+from google.adk.agents import LlmAgent
+from google.adk.tools.mcp_tool import McpToolset
+from google.adk.tools.mcp_tool.mcp_session_manager import StreamableHTTPConnectionParams
+
+crm_tools = McpToolset(
+    connection_params=StreamableHTTPConnectionParams(
+        url="https://mcp-gateway.interno/crm/mcp",      # p. ej. AgentCore Gateway o un gateway MCP propio
+        headers={"Authorization": f"Bearer {os.getenv('MCP_AUTH_TOKEN')}"},
+        timeout=5,
+        sse_read_timeout=300,
+    ),
+    tool_filter=["get_customer", "list_open_tickets"],  # solo lectura: nada de delete_customer
+)
+
+root_agent = LlmAgent(name="soporte_crm", model="gemini-flash-latest",
+                      instruction="Consulta el CRM antes de responder.", tools=[crm_tools])
+```
+
+Para stdio se usa `StdioConnectionParams(server_params=StdioServerParameters(command="npx", args=[...]))`. Ten presente que la especificación MCP vigente es la **2026-07-28** (stateless, sin handshake `initialize`); verifica que la versión del SDK `mcp` que arrastra ADK sea compatible con tus servidores. Más en [MCP](/guia/mcp).
+
+### A2A: exponer y consumir agentes
+
+ADK fue el primer framework con soporte de **A2A** (el protocolo agente↔agente, v1.0 desde marzo de 2026). Para **exponer** un agente:
+
+```python title="finanzas/a2a_server.py"
+from google.adk.a2a.utils.agent_to_a2a import to_a2a
+from finanzas.agent import root_agent
+
+a2a_app = to_a2a(root_agent, port=8001)   # app ASGI: sirve la Agent Card y el endpoint A2A
+# uvicorn finanzas.a2a_server:a2a_app --host 0.0.0.0 --port 8001
+```
+
+Para **consumir** un agente remoto se usa `RemoteA2aAgent` (`from google.adk.agents.remote_a2a_agent import RemoteA2aAgent`) con `agent_card=` apuntando a la URL de su Agent Card, y se agrega como sub-agente. La integración Python está marcada como **experimental**; ADK funciona con `a2a-sdk` 0.3.x en modo compatibilidad y 1.x (recomendado para código nuevo, con `use_legacy=False`). Ver [A2A](/guia/a2a).
+
+## Evaluación con adk eval
+
+ADK incluye un sistema de evaluación que compara la **trayectoria de herramientas** y la **respuesta final** contra casos esperados:
+
+- Archivos **`.test.json`**: una sesión (puede tener varios turnos), estilo test unitario durante el desarrollo.
+- Archivos **`.evalset.json`**: varias sesiones con consultas, herramientas esperadas, respuestas de referencia y estado inicial, para pruebas de integración.
+- Métricas por defecto: `tool_trajectory_avg_score` (umbral 1.0, trayectoria exacta) y `response_match_score` (umbral 0.8).
+
+<CodeTabs labels={["CLI", "pytest"]}>
+
+```bash title="terminal"
+# La ruta es la carpeta del agente (con __init__.py que expone "agent")
+adk eval soporte soporte/evals/pedidos_retrasados.evalset.json --print_detailed_results
+```
+
+```python title="tests/test_soporte.py"
+import pytest
+from google.adk.evaluation.agent_evaluator import AgentEvaluator
+
+@pytest.mark.asyncio
+async def test_pedidos_retrasados():
+    await AgentEvaluator.evaluate(
+        agent_module="soporte",
+        eval_dataset_file_path_or_dir="tests/fixtures/pedido_retrasado.test.json",
+    )
+```
+
+</CodeTabs>
+
+La ruta de import de `AgentEvaluator` es la de la documentación de 1.x; confírmala en tu versión. Una trayectoria exacta con umbral 1.0 es frágil para agentes abiertos: para casos donde varios caminos son válidos, ajusta criterios en el archivo de configuración y evalúa **el resultado**, no el camino. La [página de evaluación y observabilidad](/guia/evaluacion-observabilidad) profundiza en LLM-as-judge, pass^k y evals online.
+
+## Despliegue
+
+ADK no te ata a un runtime. Las opciones documentadas son:
+
+| Destino | Qué es | Cuándo elegirlo |
+|---|---|---|
+| **Agent Runtime** (ex Agent Engine) | Servicio gestionado de Gemini Enterprise Agent Platform, con Sessions y Memory Bank | Estás en GCP y quieres cero infraestructura |
+| **Cloud Run** | Contenedor serverless; `adk deploy cloud_run` | Control del contenedor con escalado automático |
+| **GKE** | Kubernetes gestionado | Plataforma K8s existente, modelos abiertos, control total |
+| **Contenedor propio** | Imagen FastAPI en cualquier infraestructura | On-premise, entornos desconectados |
+| **AWS AgentCore Runtime** | Runtime serverless de AWS con aislamiento por sesión en microVM | Tu stack es AWS y el modelo es Claude en Bedrock |
+
+```bash title="deploy-cloud-run.sh"
+adk deploy cloud_run \
+  --project=$GOOGLE_CLOUD_PROJECT \
+  --region=$GOOGLE_CLOUD_LOCATION \
+  --service_name=soporte-agent \
+  --app_name=soporte \
+  ./soporte          # --with_ui despliega también la Dev UI (no lo hagas en producción)
+```
+
+### ADK en AWS: AgentCore Runtime
+
+AgentCore Runtime es **agnóstico de framework** y el sample oficial de AWS (`awslabs/agentcore-samples`, carpeta `03-integrations/agentic-frameworks/adk`) muestra cómo envolver el Runner de ADK con `BedrockAgentCoreApp`. El contrato es simple: HTTP en el puerto 8080, endpoint `/invocations`.
+
+```python title="agentcore_main.py"
+from bedrock_agentcore.runtime import BedrockAgentCoreApp
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.genai import types
+from soporte.agent import root_agent     # con LiteLlm → bedrock/global.anthropic.claude-sonnet-5-5
+
+app = BedrockAgentCoreApp()
+session_service = InMemorySessionService()   # cada sesión de AgentCore corre aislada en su microVM
+runner = Runner(agent=root_agent, app_name="soporte", session_service=session_service)
+
+@app.entrypoint
+async def invoke(payload, context):
+    user_id = payload.get("user_id", "anon")
+    session = await session_service.create_session(app_name="soporte", user_id=user_id)
+    msg = types.Content(role="user", parts=[types.Part(text=payload["prompt"])])
+    async for event in runner.run_async(user_id=user_id, session_id=session.id, new_message=msg):
+        if event.is_final_response():
+            return {"result": event.content.parts[0].text}
+
+if __name__ == "__main__":
+    app.run()
+```
+
+El ciclo con la CLI de AgentCore (v1.0, `@aws/agentcore`) es `agentcore create` → `agentcore dev` → `agentcore deploy` → `agentcore invoke`. El código anterior es una simplificación del sample (crea una sesión por invocación); en producción mapea el ID de sesión de AgentCore a tu sesión ADK y usa **AgentCore Memory** o un `DatabaseSessionService` para la persistencia. Detalles en [AWS Bedrock y AgentCore](/guia/aws-bedrock-agentcore).
+
+<Callout type="success" title="La arquitectura del lector de referencia">
+ADK (orquestación) + proxy LiteLLM (AI gateway con claves virtuales y fallbacks) + Claude en Bedrock (modelo) + AgentCore Runtime (ejecución) + AgentCore Gateway (herramientas MCP) es una combinación coherente y soportada por samples oficiales. La desarrollamos de extremo a extremo en [Arquitectura ADK + gateway + Bedrock](/guia/arquitectura-adk-gateway-bedrock).
+</Callout>
+
+## Errores comunes y buenas prácticas
+
+<Callout type="warning" title="Errores frecuentes">
+- **Mezclar tutoriales 1.x y 2.x**: imports, workflow agents y herencia de `BaseAgent` cambiaron. Fija la versión y lee el changelog.
+- **Leer `state` antes del commit**: los cambios solo persisten cuando el evento se procesa. No dependas de efectos laterales a mitad de una herramienta.
+- **`InMemorySessionService` en producción**: se pierde todo al reiniciar y no escala horizontalmente.
+- **Descripciones vagas en sub-agentes**: el coordinador transfiere según la `description`; si dos especialistas se solapan, transferirá mal.
+- **Exponer todo el servidor MCP**: usa `tool_filter` y credenciales de mínimo privilegio.
+</Callout>
+
+| Decisión | Opción simple | Opción robusta |
+|---|---|---|
+| Modelo | String de Gemini | LiteLlm → proxy LiteLLM → Bedrock con fallbacks |
+| Sesiones | `InMemorySessionService` | `DatabaseSessionService` / Agent Platform Sessions / AgentCore Memory |
+| Multiagente | `sub_agents` | Grafo `Workflow` con nodos deterministas y HITL |
+| Guardrails | Instrucciones en el prompt | Callbacks + guardrail dedicado + política en el gateway |
+| Calidad | Pruebas manuales en `adk web` | `adk eval` en CI + evals online sobre trazas |
+
+<KeyPoints>
+
+- ADK 2.x (Python 2.13 a octubre de 2026) suma **grafos `Workflow`** que mezclan agentes y código determinista; los workflow agents clásicos quedan *superseded* en Python y Go.
+- El **Runner** y el event loop explican casi todo: el agente emite eventos y el Runner hace commit de estado y artefactos.
+- Usa **callbacks** para políticas en código (límites de reembolso, PII), no solo instrucciones.
+- `sub_agents` cede el control; `AgentTool` lo conserva. Elige según quién debe responder al usuario.
+- Claude en Bedrock funciona vía **LiteLlm** con perfiles de inferencia y `litellm>=1.84`; en empresa, pásalo por un **proxy LiteLLM**.
+- ADK corre en Agent Runtime, Cloud Run, GKE o **AgentCore Runtime** en AWS.
+
+</KeyPoints>
+
+## Siguientes pasos
+
+<Cards cols={3}>
+  <Card title="Arquitectura de referencia" href="/guia/arquitectura-adk-gateway-bedrock">ADK + AI gateway + Bedrock + AgentCore, de extremo a extremo.</Card>
+  <Card title="AI gateways" href="/guia/gateways">LiteLLM Proxy, claves virtuales, presupuestos y fallbacks.</Card>
+  <Card title="AWS Bedrock y AgentCore" href="/guia/aws-bedrock-agentcore">Runtime, Memory, Gateway, Identity y Policy.</Card>
+  <Card title="Strands Agents" href="/guia/strands-agents">La alternativa nativa de AWS, para comparar enfoques.</Card>
+  <Card title="Comparativa de frameworks" href="/guia/comparativa-frameworks">ADK frente a LangGraph, Strands y el resto.</Card>
+  <Card title="Google Agent Platform" href="/guia/google-agent-platform">Agent Runtime, Sessions, Memory Bank y Agent Gateway.</Card>
+</Cards>

@@ -1,0 +1,253 @@
+**Agent2Agent (A2A)** es un protocolo abierto para que **agentes independientes se descubran, se deleguen tareas y se devuelvan resultados**, aunque estén construidos con frameworks distintos, corran en nubes distintas o pertenezcan a organizaciones distintas. Cada agente es una **caja negra**: expone qué sabe hacer, pero no comparte su código, sus herramientas, su memoria ni su prompt.
+
+Si [MCP](/guia/mcp) estandariza cómo un agente usa **herramientas**, A2A estandariza cómo un agente habla con **otro agente**. La diferencia no es cosmética: una herramienta es una función predecible; un agente razona, puede tardar horas, pedir más información o rechazar la tarea.
+
+## Estado en octubre de 2026
+
+<Cards cols={3}>
+  <Card title="v1.0 estable" tag="spec">
+    **v1.0.0** se publicó el 12 de marzo de 2026 y **v1.0.1** el 28 de mayo de 2026. Es la primera versión con garantías de estabilidad; la anterior ampliamente usada fue la v0.3.0 (julio de 2025).
+  </Card>
+  <Card title="Gobernanza neutral" tag="AAIF">
+    Lanzado por Google en abril de 2025, se unió a la **Agentic AI Foundation** el 27 de agosto de 2026, con más de 150 organizaciones. El **ACP** de IBM se fusionó con A2A en agosto de 2025.
+  </Card>
+  <Card title="Soporte amplio" tag="plataformas">
+    ADK, Strands, Microsoft Agent Framework, Microsoft Foundry (A2A v1.0 GA), Google Agent Registry y AgentCore Runtime, entre otros.
+  </Card>
+</Cards>
+
+## MCP, A2A y AG-UI: tres capas, no tres competidores
+
+<Diagram id="a2a-capas" />
+
+| | MCP | A2A | AG-UI |
+|---|---|---|---|
+| Conecta | Agente ↔ herramientas y datos | Agente ↔ agente | Agente ↔ interfaz de usuario |
+| El otro lado es | Una función con esquema (predecible) | Un agente autónomo (opaco, con criterio) | Una persona frente a una app |
+| Unidad de trabajo | `tools/call` | **Task** con estados y artefactos | Stream de eventos |
+| Duración típica | Segundos | Segundos a días | Mientras dura la interacción |
+| Quién controla | El agente que llama | El agente remoto decide cómo resolver | El usuario y el agente |
+| Ejemplo | Consultar el CRM | Pedir al agente de Finanzas que apruebe un descuento | Mostrar progreso y pedir aprobación en la web |
+
+Un sistema empresarial maduro suele usar **los tres**: la app habla AG-UI con el orquestador, el orquestador usa MCP para sus herramientas y delega por A2A a agentes de otros equipos.
+
+<Callout type="tip" title="No conviertas todo en agente">
+Si el "agente remoto" en realidad es una consulta determinista (dame el saldo del cliente), expónlo como **tool MCP**. A2A compensa cuando el otro lado necesita autonomía: decidir, pedir más datos, coordinar humanos o trabajar durante mucho tiempo. Cada salto A2A agrega latencia, costo de tokens y un punto de falla.
+</Callout>
+
+## Conceptos del protocolo
+
+### Agent Card: la tarjeta de presentación
+
+Cada agente A2A publica una **Agent Card**, un JSON en una ruta conocida: **`/.well-known/agent-card.json`**. Describe identidad, proveedor, **skills**, capacidades (streaming, push, card extendida), las **interfaces** donde escucha y cómo autenticarse. En v1.0 las cards pueden ir **firmadas** (JWS sobre el JSON canonicalizado según RFC 8785), lo que permite verificar que una card descargada de un registry no fue alterada. Además existe una **card extendida** que solo se entrega a clientes autenticados (`GetExtendedAgentCard`), útil para no publicar skills internas.
+
+```json title="agent-card.json"
+{
+  "name": "Agente de Finanzas Comerciales",
+  "description": "Evalúa y aprueba descuentos y notas de crédito según la política comercial vigente.",
+  "version": "2.3.0",
+  "provider": { "organization": "Retail Andino S.A. - Finanzas", "url": "https://finanzas.interno" },
+  "supportedInterfaces": [
+    { "url": "https://finanzas.interno/a2a/jsonrpc", "protocolBinding": "JSONRPC", "protocolVersion": "1.0" },
+    { "url": "https://finanzas.interno/a2a/rest", "protocolBinding": "HTTP+JSON", "protocolVersion": "1.0" }
+  ],
+  "capabilities": { "streaming": true, "pushNotifications": true, "extendedAgentCard": true },
+  "securitySchemes": {
+    "corp_oidc": { "openIdConnectSecurityScheme": {
+      "openIdConnectUrl": "https://login.retailandino.com/.well-known/openid-configuration" } }
+  },
+  "securityRequirements": [{ "schemes": { "corp_oidc": { "list": ["openid", "finanzas.descuentos"] } } }],
+  "defaultInputModes": ["text/plain", "application/json"],
+  "defaultOutputModes": ["application/json"],
+  "skills": [{
+    "id": "approve_discount",
+    "name": "Aprobar descuento",
+    "description": "Evalúa un descuento compensatorio para un pedido; sobre 10 % requiere aprobación humana.",
+    "tags": ["descuentos", "compensaciones", "postventa"],
+    "examples": ["Aprueba un 12 % de descuento al cliente C-889 por el retraso del pedido 4512"],
+    "inputModes": ["application/json", "text/plain"],
+    "outputModes": ["application/json"]
+  }],
+  "signatures": [{ "protected": "eyJhbGciOiJFUzI1NiIs...", "signature": "MEUCIQ..." }]
+}
+```
+
+### Tareas, mensajes, partes y artefactos
+
+- **Message**: un turno de comunicación con `role` (usuario o agente), compuesto de **Parts**.
+- **Part**: la unidad de contenido. En v1.0 hay un único tipo de Part que contiene **exactamente uno** de `text`, `raw` (bytes en base64), `url` o `data` (JSON estructurado), más `mediaType` y `filename` opcionales.
+- **Task**: la unidad de trabajo con estado, identificada por `id` y agrupada por `contextId` (una conversación puede tener varias tareas). El remoto decide si responde con un mensaje directo o crea una tarea.
+- **Artifact**: el **resultado** de la tarea (un documento, un JSON, una imagen), también hecho de Parts. Se puede entregar en trozos mientras se genera.
+
+Estados de una tarea (en v1.0 con prefijo `TASK_STATE_`):
+
+| Estado | Significado | ¿Terminal? |
+|---|---|---|
+| `SUBMITTED` | Recibida, aún no empieza | No |
+| `WORKING` | En proceso | No |
+| `INPUT_REQUIRED` | El agente necesita más información del cliente | No (interrumpido) |
+| `AUTH_REQUIRED` | Se requiere autenticación adicional | No (interrumpido) |
+| `COMPLETED` | Terminada con éxito; artefactos disponibles | Sí |
+| `FAILED` | Terminó con error | Sí |
+| `CANCELED` | Cancelada por el cliente | Sí |
+| `REJECTED` | El agente decidió no hacerla | Sí |
+
+Recorre un caso completo, con descubrimiento, autenticación y una pausa por `INPUT_REQUIRED`:
+
+<Diagram id="a2a-tareas" height={600} />
+
+### Bindings, streaming y notificaciones
+
+A2A define un modelo de datos y operaciones abstractas (`SendMessage`, `SendStreamingMessage`, `GetTask`, `ListTasks`, `CancelTask`, `SubscribeToTask`, `GetExtendedAgentCard` y la gestión de configuraciones de push) que se transportan por tres **bindings** equivalentes:
+
+- **JSON-RPC 2.0** sobre HTTP: el más usado.
+- **gRPC**: para tráfico interno de alto volumen.
+- **HTTP+JSON** (estilo REST).
+
+Para tareas que tardan, hay dos mecanismos:
+
+<Steps>
+
+1. **Streaming por SSE**: `SendStreamingMessage` abre un stream que entrega actualizaciones de estado (`statusUpdate`) y de artefactos (`artifactUpdate`) a medida que ocurren. Si la conexión se corta, `SubscribeToTask` permite volver a engancharse a una tarea existente.
+2. **Push notifications**: el cliente registra un **webhook** y el remoto le notifica los cambios de estado. Es lo adecuado para procesos de horas o días (aprobaciones, conciliaciones), donde mantener un stream abierto no tiene sentido. Valida la autenticidad de cada notificación entrante.
+
+</Steps>
+
+**Extensiones**: A2A permite agregar capacidades fuera del núcleo (por ejemplo, metadatos de trazabilidad o perfiles de dominio), que el cliente activa con el header `A2A-Extensions`.
+
+### Qué cambió de v0.3 a v1.0
+
+Si tienes integraciones de 2025, v1.0 trae cambios incompatibles:
+
+| Área | v0.3 | v1.0 |
+|---|---|---|
+| Operaciones | `message/send`, `tasks/get`, `tasks/resubscribe`… | `SendMessage`, `GetTask`, `SubscribeToTask`… (PascalCase); nueva `ListTasks` |
+| Enums | `completed`, `user` | `TASK_STATE_COMPLETED`, `ROLE_USER` |
+| Parts | `TextPart`, `FilePart`, `DataPart` con `kind` | Un solo `Part` con `text` / `raw` / `url` / `data`; `mimeType` → `mediaType` |
+| Agent Card | `url`, `preferredTransport`, `additionalInterfaces` | `supportedInterfaces[]` con `url`, `protocolBinding`, `protocolVersion`; firmas JWS |
+| Card extendida | `supportsAuthenticatedExtendedCard` | `capabilities.extendedAgentCard` + `GetExtendedAgentCard` |
+| Paginación | `page` / `perPage` | Cursor: `pageToken`, `pageSize`, `nextPageToken` |
+| Multi-tenant | — | Campo `tenant` en requests e interfaces |
+| OAuth | Incluía implicit y password | Eliminados; se agrega device code y `pkceRequired` |
+| Errores HTTP | `application/problem+json` | `google.rpc.Status` con `ErrorInfo` |
+
+<Callout type="info">
+El ADK de Python detecta automáticamente si tienes instalado `a2a-sdk` 0.3.x (modo compatibilidad) o 1.x; la documentación recomienda apuntar a **1.x** en integraciones nuevas.
+</Callout>
+
+## Exponer y consumir un agente con Google ADK
+
+ADK convierte un agente en un servidor A2A con `to_a2a()`, que genera una app ASGI y la Agent Card. El soporte A2A de ADK para Python sigue marcado como **experimental** en octubre de 2026.
+
+<CodeTabs labels={["Exponer (to_a2a)", "Consumir (RemoteA2aAgent)"]}>
+
+```python title="finanzas/agent.py"
+# pip install google-adk a2a-sdk "litellm>=1.84"
+from google.adk.agents import Agent
+from google.adk.models.lite_llm import LiteLlm
+from google.adk.a2a.utils.agent_to_a2a import to_a2a
+
+def evaluate_discount(order_id: str, percent: float) -> dict:
+    """Evalúa un descuento compensatorio contra la política comercial.
+
+    Args:
+        order_id: Pedido afectado.
+        percent: Porcentaje de descuento solicitado.
+    """
+    needs_human = percent > 10
+    return {"order_id": order_id, "approved": not needs_human, "needs_human": needs_human}
+
+root_agent = Agent(
+    name="finanzas_comerciales",
+    model=LiteLlm(model="litellm_proxy/claude-sonnet"),
+    instruction="Evalúas descuentos. Sobre 10 % pides aprobación humana antes de confirmar.",
+    tools=[evaluate_discount],
+)
+
+# Genera la app A2A. to_a2a no abre el puerto: debe coincidir con el de uvicorn,
+# porque es la URL que se anuncia en la Agent Card.
+a2a_app = to_a2a(root_agent, port=8001, agent_card="finanzas/agent-card.json")
+# uvicorn finanzas.agent:a2a_app --host 0.0.0.0 --port 8001
+```
+
+```python title="soporte/agent.py"
+from google.adk.agents import Agent
+from google.adk.agents.remote_a2a_agent import RemoteA2aAgent, AGENT_CARD_WELL_KNOWN_PATH
+from google.adk.models.lite_llm import LiteLlm
+
+finanzas = RemoteA2aAgent(
+    name="finanzas_comerciales",
+    description="Aprueba descuentos y notas de crédito según la política comercial.",
+    agent_card=f"https://finanzas.interno{AGENT_CARD_WELL_KNOWN_PATH}",
+)
+
+root_agent = Agent(
+    name="soporte_postventa",
+    model=LiteLlm(model="litellm_proxy/claude-sonnet"),
+    instruction="Resuelves reclamos. Para cualquier descuento, delega en finanzas_comerciales.",
+    sub_agents=[finanzas],   # el remoto se usa como un sub-agente más
+)
+```
+
+</CodeTabs>
+
+Si no pasas `agent_card`, ADK construye una a partir del nombre, la descripción y las herramientas del agente; para producción conviene mantener la card versionada y revisada (skills, ejemplos, seguridad). ADK también puede servir agentes por A2A con `adk api_server --a2a`.
+
+## Soporte en plataformas y frameworks
+
+| Plataforma / framework | Soporte A2A (octubre de 2026) |
+|---|---|
+| **Google ADK** | `to_a2a()` para exponer, `RemoteA2aAgent` para consumir. Experimental en Python |
+| **AWS Strands Agents** | A2A como uno de sus patrones multiagente (servidor y cliente) |
+| **Microsoft Agent Framework** | A2A soportado (1.0 GA en .NET y Python, abril de 2026) |
+| **Microsoft Foundry Agent Service** | **A2A v1.0 GA**; agentes publicables hacia Teams y Copilot |
+| **Gemini Enterprise Agent Platform** | **Agent Registry** GA (18 de junio de 2026) con A2A v1.0; A2A en Agent Runtime en preview |
+| **Amazon Bedrock AgentCore** | Runtime acepta agentes A2A en el **puerto 9000**, ruta `/`; Gateway ofrece passthrough HTTP para A2A; **AgentCore Registry** (GA agosto de 2026) cataloga agentes, servidores MCP y skills |
+
+## Diseñar un agente A2A que otros quieran usar
+
+Publicar un agente por A2A es publicar un **contrato** para otros equipos. Las mismas reglas que hacen buena una API aplican aquí, con algunas propias de los agentes:
+
+- **Skills acotadas y con ejemplos**. "Aprobar descuentos compensatorios de postventa" es mejor que "Finanzas". La descripción y los `examples` de cada skill son lo que el LLM del agente cliente lee para decidir si delega; escríbelos como escribirías la descripción de una herramienta.
+- **Entradas y salidas estructuradas**. Acepta un Part `data` con un esquema documentado (pedido, cliente, monto) además del texto libre, y devuelve artefactos JSON validables. Un artefacto en prosa obliga al cliente a interpretar, y eso es fuente de errores.
+- **Usa los estados interrumpidos**. Si falta un dato, responde `INPUT_REQUIRED` con una pregunta precisa en vez de adivinar o fallar. Si la acción requiere otra credencial, `AUTH_REQUIRED`.
+- **`REJECTED` es una respuesta válida**. Un agente que rechaza una tarea fuera de su política (descuento del 40 %) es más seguro que uno que intenta cumplirla.
+- **Versiona la card** (`version`) y mantén compatibilidad: otros agentes dependen de tus skills.
+- **Mide desde el lado del servidor**: tasa de tareas completadas, rechazadas y abandonadas en `INPUT_REQUIRED`, latencia por skill y costo por tarea.
+
+## Seguridad y gobierno entre agentes
+
+OWASP incluye la **comunicación insegura entre agentes** entre los riesgos de su Top 10 para aplicaciones agénticas 2026. Prácticas mínimas:
+
+- **Autentica siempre**: OIDC/OAuth2 o mTLS según declare la card. Nada de agentes anónimos en la red interna.
+- **Verifica la firma** de las Agent Cards y descúbrelas desde un **registry gobernado** (Agent Registry, AgentCore Registry o uno propio), no desde URLs arbitrarias.
+- **Autoriza por skill**: que un agente pueda pedir `approve_discount` no implica que pueda pedir `issue_credit_note`.
+- **Trata la respuesta como no confiable**: un artefacto de otro agente puede contener instrucciones inyectadas. Valídalo con esquema antes de actuar sobre él.
+- **Propaga trazas** (OpenTelemetry) entre agentes para reconstruir una cadena de delegación completa.
+- **Límites**: profundidad máxima de delegación, timeouts y presupuesto por tarea para evitar cascadas de llamadas.
+
+<Callout type="warning" title="Errores comunes">
+- Usar A2A para lo que es una simple llamada de función: latencia y costo sin beneficio.
+- Ignorar `INPUT_REQUIRED` y `AUTH_REQUIRED`: el cliente queda esperando una tarea que nunca termina.
+- Mezclar clientes v0.3 y servidores v1.0 sin verificar compatibilidad (nombres de operaciones, enums y Parts cambiaron).
+- Publicar en la card pública skills internas que deberían ir en la card extendida autenticada.
+</Callout>
+
+<KeyPoints>
+
+- A2A conecta **agentes autónomos y opacos**; MCP conecta herramientas; AG-UI conecta la interfaz.
+- La **Agent Card** (`/.well-known/agent-card.json`) declara skills, interfaces y seguridad; en v1.0 puede ir **firmada**.
+- La unidad de trabajo es la **Task**, con estados `SUBMITTED` → `WORKING` → (`INPUT_REQUIRED`) → `COMPLETED`, y resultados como **artefactos**.
+- Bindings JSON-RPC, gRPC y HTTP+JSON; **SSE** para streaming y **webhooks** para tareas largas.
+- **v1.0** rompe compatibilidad con v0.3 (operaciones, enums, Parts, card, paginación).
+- Gobernado por la **AAIF** desde agosto de 2026; soportado en ADK, Strands, Agent Framework, Foundry, Agent Registry y AgentCore.
+
+</KeyPoints>
+
+## Siguientes pasos
+
+<Cards cols={3}>
+  <Card title="Arquitectura multiagente con A2A" href="/guia/arquitectura-multiagente-a2a">Un sistema orquestador + especialistas de punta a punta.</Card>
+  <Card title="Patrones de diseño" href="/guia/patrones-de-diseno">Orquestador-workers, handoffs y cuándo usar varios agentes.</Card>
+  <Card title="Gateways" href="/guia/gateways">Dónde aplicar autenticación, cuotas y auditoría al tráfico entre agentes.</Card>
+</Cards>

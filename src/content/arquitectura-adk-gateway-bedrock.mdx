@@ -1,0 +1,484 @@
+Esta es la arquitectura que más se repite en empresas que estandarizaron **Google ADK** como framework y **AWS** como nube: el agente se escribe en ADK, corre en **Bedrock AgentCore Runtime**, habla con **Claude en Bedrock** siempre a través de un **AI gateway corporativo** (LiteLLM Proxy) y accede a sistemas internos mediante **MCP** gobernado por **AgentCore Gateway**. Sobre esa columna vertebral se montan RAG, memoria, guardrails, observabilidad y evaluaciones.
+
+El ejemplo concreto es un **asistente de operaciones para una cadena de retail**: responde a jefes de tienda y analistas sobre pedidos, stock y procedimientos, y puede emitir acciones acotadas (crear un ticket, proponer una nota de crédito). Todo lo que sigue está anclado a **octubre de 2026**.
+
+<Callout type="info" title="Por qué esta combinación">
+ADK no trae integración nativa con Bedrock: la vía documentada es el conector **LiteLLM** (`google.adk.models.lite_llm.LiteLlm`). Eso convierte a LiteLLM en la pieza natural para el gateway: el mismo formato `bedrock/<perfil>` sirve embebido en el agente o centralizado en un proxy. AgentCore, por su parte, es agnóstico de framework y tiene un sample oficial de ADK.
+</Callout>
+
+## Vista general: qué hace cada pieza
+
+<Cards cols={3}>
+  <Card title="Agente ADK" tag="orquesta">`LlmAgent` + `Runner`, envuelto con `BedrockAgentCoreApp`. Lógica del loop, instrucciones y callbacks.</Card>
+  <Card title="AgentCore Runtime" tag="ejecuta">MicroVM aislada por sesión, autorizador JWT, escalado serverless, contrato HTTP en `:8080/invocations`.</Card>
+  <Card title="LiteLLM Proxy" tag="AI gateway">Claves virtuales, presupuestos, límites, fallback entre perfiles de inferencia, guardrails y logs de costo.</Card>
+  <Card title="Claude en Bedrock" tag="razona">`global.anthropic.claude-sonnet-5-5` vía perfil de inferencia, con prompt caching.</Card>
+  <Card title="AgentCore Gateway" tag="herramientas">APIs, Lambdas y servidores MCP tras un solo endpoint MCP, con Identity (OAuth) y Policy (Cedar).</Card>
+  <Card title="KB · Memory · Obs" tag="contexto y control">Knowledge Bases para RAG, AgentCore Memory para sesiones y recuerdos, OTel → CloudWatch, Evaluations.</Card>
+</Cards>
+
+## Recorrido de una petición
+
+Un jefe de tienda pregunta: *"¿Por qué el pedido 4512 no llegó y qué le puedo ofrecer al cliente?"*. Recorre los ocho pasos (haz clic en cada nodo para ver el detalle):
+
+<Diagram id="adk-bedrock-arquitectura" height={560} />
+
+Tres decisiones de diseño quedan visibles en el diagrama:
+
+1. **El agente no tiene permisos sobre Bedrock.** Solo conoce la URL del gateway y una clave virtual. Las credenciales IAM hacia los modelos viven en el gateway.
+2. **El agente no tiene credenciales de los sistemas internos.** Llama herramientas MCP en AgentCore Gateway; Identity guarda los tokens salientes y Policy decide cada llamada.
+3. **Hay dos gateways distintos**: uno para **modelos** (LiteLLM) y otro para **herramientas** (AgentCore Gateway). Resuelven problemas distintos y suelen tener dueños distintos (plataforma de IA vs. integración/seguridad). Lo explicamos en [Gateways](/guia/gateways).
+
+## Cómo conectar ADK con Claude: tres opciones
+
+Antes de entrar en el código conviene fijar la decisión más importante: **por dónde pasan las llamadas al modelo**.
+
+<CodeTabs labels={["A · LiteLLM embebido", "B · LiteLLM Proxy (recomendada)", "C · Todo Bedrock"]}>
+
+```python title="opcion_a.py"
+# pip install google-adk "litellm>=1.84" boto3
+import os
+from google.adk.agents import LlmAgent
+from google.adk.models.lite_llm import LiteLlm
+
+os.environ["AWS_REGION_NAME"] = "us-east-1"   # credenciales: cadena estándar de boto3 (rol IAM)
+agente = LlmAgent(
+    name="asistente_operaciones",
+    model=LiteLlm(model="bedrock/global.anthropic.claude-sonnet-5-5"),
+    instruction="Eres el asistente de operaciones de la cadena.",
+)
+# El rol del Runtime necesita bedrock:InvokeModel sobre el perfil y los modelos destino.
+```
+
+```python title="opcion_b.py"
+# El agente solo conoce el gateway y su clave virtual.
+import os
+from google.adk.agents import LlmAgent
+from google.adk.models.lite_llm import LiteLlm
+
+agente = LlmAgent(
+    name="asistente_operaciones",
+    model=LiteLlm(
+        model="litellm_proxy/claude-sonnet",      # model_name del config.yaml del proxy
+        api_base=os.environ["AI_GATEWAY_URL"],    # https://ai-gateway.interno
+        api_key=os.environ["AI_GATEWAY_KEY"],     # clave virtual sk-... del equipo
+    ),
+    instruction="Eres el asistente de operaciones de la cadena.",
+)
+```
+
+```text title="opcion_c.txt"
+Si TODOS los modelos que usarás están en Bedrock, AgentCore Gateway puede
+actuar también como gateway de inferencia ("inference targets", 2026) con
+fallback de modelo (octubre de 2026). El agente apunta al Gateway en vez de
+a LiteLLM y la gobernanza queda en un solo servicio gestionado.
+
+Verifica en la documentación de AgentCore Gateway el formato exacto del
+endpoint de inferencia y su compatibilidad con el cliente LiteLLM de ADK
+antes de adoptarlo: es una capacidad reciente.
+```
+
+</CodeTabs>
+
+| | A · SDK embebido | B · LiteLLM Proxy | C · AgentCore Gateway (inferencia) |
+|---|---|---|---|
+| Dónde viven las credenciales de Bedrock | Rol IAM de cada agente | Solo en el gateway | Rol del Gateway |
+| Claves y presupuestos por equipo/agente | No (solo IAM y tags) | Sí: claves virtuales, `max_budget`, tpm/rpm | Parcial (políticas y cuotas del servicio) |
+| Fallback entre perfiles/regiones | En código, por agente | Central (`fallbacks`, `num_retries`, cooldown) | Central, gestionado |
+| Multiproveedor (Gemini, OpenAI, modelos propios) | Sí, pero disperso | Sí, con una sola API | Orientado a Bedrock |
+| Guardrails transversales | Callback en cada agente | `guardrails:` en el proxy para todos | Policy + Guardrails integrados |
+| Operación | Ninguna extra | Operas ECS/EKS, RDS, upgrades | Servicio gestionado |
+| Latencia añadida | Ninguna | Un salto de red interno (ms) | Un salto gestionado |
+| Cuándo elegirla | Prototipos, un solo equipo | **Varios equipos/agentes, chargeback, multiproveedor** | Organización 100 % Bedrock sin necesidad de proxy propio |
+
+La recomendación para el lector típico de esta guía es **B**: varios equipos construyen agentes, finanzas quiere costo por equipo, seguridad quiere un único punto de control y es probable que algún agente use Gemini o un modelo abierto. Si mañana todo queda en Bedrock y el equipo de plataforma prefiere no operar contenedores, migrar a **C** es cambiar `api_base` y el nombre del modelo, no reescribir el agente.
+
+## Estructura del proyecto
+
+Un repositorio por agente, con el gateway en un repositorio de plataforma aparte (lo opera otro equipo y lo comparten todos los agentes):
+
+```text title="asistente-operaciones/"
+asistente-operaciones/
+├── agentcore/
+│   ├── agentcore.json        # spec del proyecto: runtime, memory, gateway, credenciales
+│   ├── aws-targets.json      # cuentas y regiones (staging, producción)
+│   └── cdk/                  # CDK generado por la CLI
+├── app/
+│   └── ops_agent/
+│       ├── main.py           # entrypoint AgentCore → Runner de ADK
+│       ├── agent.py          # LlmAgent, LiteLlm (proxy), McpToolset, callbacks
+│       ├── guardrails.py     # callbacks de defensa en profundidad
+│       └── pyproject.toml    # google-adk, litellm>=1.84, bedrock-agentcore
+├── policies/
+│   └── herramientas.cedar    # políticas del AgentCore Gateway
+└── evals/
+    ├── set_dorado.jsonl      # casos reales con resultado esperado
+    └── correr_evals.py
+
+plataforma-ai-gateway/        # repo del equipo de plataforma
+├── config.yaml               # LiteLLM Proxy
+└── infra/                    # ECS/EKS, ALB+WAF, RDS, Secrets Manager
+```
+
+Con la CLI de AgentCore (`npm install -g @aws/agentcore`, v1.0 en octubre de 2026) el esqueleto se crea con `agentcore create --name AsistenteOperaciones --template empty` y `agentcore add runtime --name ops_agent --language python --protocol HTTP`. Las plantillas con código generado son de Strands, LangChain y Vercel AI SDK; para ADK escribes tú el `main.py` siguiendo el contrato HTTP del Runtime.
+
+## El agente: modelo vía gateway, herramientas vía MCP y callbacks
+
+```python title="app/ops_agent/agent.py"
+import os
+from google.adk.agents import LlmAgent
+from google.adk.models.lite_llm import LiteLlm
+from google.adk.tools.mcp_tool import McpToolset
+from google.adk.tools.mcp_tool.mcp_session_manager import StreamableHTTPConnectionParams
+from guardrails import guardrail_entrada, validar_argumentos
+
+modelo = LiteLlm(
+    model="litellm_proxy/claude-sonnet",          # alias del gateway, no el ID de Bedrock
+    api_base=os.environ["AI_GATEWAY_URL"],
+    api_key=os.environ["AI_GATEWAY_KEY"],         # inyectada desde Secrets Manager
+)
+
+herramientas = McpToolset(
+    connection_params=StreamableHTTPConnectionParams(
+        url=os.environ["AGENTCORE_GATEWAY_URL"],  # endpoint MCP del AgentCore Gateway
+        headers={"Authorization": f"Bearer {os.environ['GATEWAY_TOKEN']}"},
+    ),
+    tool_filter=[                                  # solo lo que este agente necesita
+        "Pedidos___consultar_pedido",
+        "Inventario___stock_por_tienda",
+        "Procedimientos___buscar",
+        "Tickets___crear_ticket",
+    ],
+)
+
+root_agent = LlmAgent(
+    name="asistente_operaciones",
+    model=modelo,
+    instruction=(
+        "Eres el asistente de operaciones de la cadena. Usa las herramientas; no inventes "
+        "estados ni políticas. Cita el procedimiento que respalda cada recomendación.\n"
+        "Recuerdos del usuario: {recuerdos}"       # se rellena desde el estado de la sesión
+    ),
+    tools=[herramientas],
+    before_model_callback=guardrail_entrada,       # defensa en profundidad (ver abajo)
+    before_tool_callback=validar_argumentos,       # reglas de negocio antes de cada tool
+)
+```
+
+Los guardrails principales viven en el gateway, pero un callback en el agente sigue siendo útil: protege también la **Opción A**, permite reglas específicas del dominio y evita gastar una llamada al modelo si la entrada ya es inaceptable. `ApplyGuardrail` evalúa texto sin invocar ningún modelo:
+
+```python title="app/ops_agent/guardrails.py"
+import os
+import boto3
+from google.adk.agents.callback_context import CallbackContext
+from google.adk.models import LlmRequest, LlmResponse
+from google.genai import types
+
+bedrock = boto3.client("bedrock-runtime")
+
+def guardrail_entrada(callback_context: CallbackContext, llm_request: LlmRequest) -> LlmResponse | None:
+    """Revisa el último turno del usuario con Bedrock Guardrails antes de llamar al modelo."""
+    ultimo = llm_request.contents[-1] if llm_request.contents else None
+    texto = " ".join(p.text for p in (ultimo.parts if ultimo else []) if p.text)
+    if not texto:
+        return None
+    r = bedrock.apply_guardrail(
+        guardrailIdentifier=os.environ["GUARDRAIL_ID"], guardrailVersion="3",
+        source="INPUT", content=[{"text": {"text": texto}}],
+    )
+    if r["action"] == "GUARDRAIL_INTERVENED":       # devolver LlmResponse = saltar el modelo
+        return LlmResponse(content=types.Content(role="model",
+            parts=[types.Part(text="No puedo ayudarte con esa solicitud.")]))
+    return None                                     # None = continuar normalmente
+
+def validar_argumentos(tool, args, tool_context):
+    """Regla barata en código: nunca crear tickets sin tienda asociada."""
+    if tool.name.endswith("crear_ticket") and not args.get("tienda_id"):
+        return {"error": "Falta tienda_id: pídeselo al usuario antes de crear el ticket."}
+    return None
+```
+
+<Callout type="warning" title="Contenido recuperado = no confiable">
+El callback revisa la entrada, pero el riesgo mayor en agentes es la **inyección indirecta**: instrucciones escondidas en un documento de la KB o en la respuesta de una herramienta. Por eso el guardrail del gateway corre en `pre_call` sobre **todo** el prompt (incluidos resultados de herramientas) y las acciones de escritura dependen de **Policy** y no del criterio del modelo.
+</Callout>
+
+## El entrypoint: ADK dentro de AgentCore Runtime
+
+El sample oficial de ADK en `awslabs/agentcore-samples` muestra el patrón: crear un `BedrockAgentCoreApp`, decorar una función con `@app.entrypoint` y ejecutar el `Runner` de ADK dentro. Aquí lo extendemos con dos ajustes de producción: el `Runner` se crea **una vez por microVM** (no por petición) y la conversación se persiste en **AgentCore Memory**.
+
+```python title="app/ops_agent/main.py"
+import os
+from bedrock_agentcore.runtime import BedrockAgentCoreApp
+from bedrock_agentcore.memory import MemoryClient
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.genai import types
+from agent import root_agent
+
+APP = "asistente_operaciones"
+MEMORY_ID = os.environ["MEMORY_ID"]
+app = BedrockAgentCoreApp()
+memoria = MemoryClient(region_name=os.environ["AWS_REGION"])
+sesiones = InMemorySessionService()      # caché local: vive lo que vive la microVM de la sesión
+runner = Runner(agent=root_agent, app_name=APP, session_service=sesiones)
+
+@app.entrypoint
+async def invocar(payload, context):
+    user_id = payload["user_id"]         # en producción: derívalo del JWT validado, no del payload
+    sid = context.session_id             # una microVM por session_id
+    if await sesiones.get_session(app_name=APP, user_id=user_id, session_id=sid) is None:
+        recuerdos = memoria.retrieve_memories(memory_id=MEMORY_ID,
+            namespace=f"/preferencias/{user_id}/", query=payload["prompt"])
+        await sesiones.create_session(app_name=APP, user_id=user_id, session_id=sid,
+            state={"recuerdos": "\n".join(r["content"]["text"] for r in recuerdos)})
+    mensaje = types.Content(role="user", parts=[types.Part(text=payload["prompt"])])
+    final = ""
+    async for evento in runner.run_async(user_id=user_id, session_id=sid, new_message=mensaje):
+        if evento.is_final_response() and evento.content and evento.content.parts:
+            final = evento.content.parts[0].text or ""
+    memoria.create_event(memory_id=MEMORY_ID, actor_id=user_id, session_id=sid,
+        messages=[(payload["prompt"], "USER"), (final, "ASSISTANT")])
+    return {"result": final}
+
+if __name__ == "__main__":
+    app.run()                            # sirve :8080 /invocations y /ping
+```
+
+### Por qué reemplazar `InMemorySessionService`
+
+`InMemorySessionService` guarda la sesión en la memoria del proceso. En AgentCore Runtime eso funciona mientras vive la microVM de esa sesión, pero se pierde cuando la sesión expira o se recicla, y no sirve para recordar preferencias entre conversaciones. **AgentCore Memory** cubre ambas cosas:
+
+- **Corto plazo**: `create_event` guarda cada turno por `actor_id` y `session_id`.
+- **Largo plazo**: las **estrategias** (resumen, preferencias, hechos semánticos) extraen registros en segundo plano a namespaces como `/preferencias/{actorId}/`, que luego recuperas con `retrieve_memories`.
+
+<Callout type="info" title="Integración ADK ↔ AgentCore Memory">
+Al momento de escribir no encontramos un `SessionService` oficial de ADK respaldado por AgentCore Memory (sí existen integraciones oficiales para Strands y LangGraph). Las dos opciones razonables son las del ejemplo —sesión local + persistencia explícita con `MemoryClient`— o escribir un adaptador que implemente `BaseSessionService`/`BaseMemoryService` de ADK sobre la API de Memory. Revisa el repositorio de samples antes de construirlo: es un hueco que probablemente se cubra pronto.
+</Callout>
+
+### Alternativa: ECS o Cloud Run
+
+Si no puedes usar AgentCore (región no soportada, plataforma de contenedores obligatoria), el mismo agente corre con `adk api_server` en **ECS Fargate** o en **Cloud Run**. Ganas control y pierdes el aislamiento por sesión, el autorizador gestionado y Memory/Identity integrados: tendrás que aportar `DatabaseSessionService` (Postgres), un autorizador propio y gestión de secretos. Desde Cloud Run, el tráfico hacia el gateway en AWS cruza nubes: usa conectividad privada (VPN/Interconnect) o mTLS con federación de identidad de cargas, nunca un endpoint público con clave estática.
+
+## El AI gateway: LiteLLM Proxy siguiendo la guía de AWS
+
+La guía **Multi-Provider Generative AI Gateway on AWS** describe el despliegue de referencia: LiteLLM en **ECS o EKS** detrás de un **ALB con WAF**, **RDS Postgres** para claves y gasto, **Secrets Manager** para credenciales y **Bedrock Guardrails** aplicable a cualquier proveedor. Este es el detalle de lo que ocurre dentro:
+
+<Diagram id="adk-bedrock-gateway" height={540} />
+
+La configuración que materializa ese diagrama:
+
+```yaml title="plataforma-ai-gateway/config.yaml"
+model_list:
+  - model_name: claude-sonnet                  # alias que usan los agentes
+    litellm_params:
+      model: bedrock/global.anthropic.claude-sonnet-5-5
+      aws_region_name: us-east-1               # región de origen; global. enruta a todo el mundo
+      cache_control_injection_points:          # prompt caching (repítelo en cada deployment)
+        - location: message
+          role: system
+  - model_name: claude-sonnet-eu
+    litellm_params:
+      model: bedrock/eu.anthropic.claude-sonnet-5-5
+      aws_region_name: eu-west-1               # los perfiles eu. se invocan desde regiones UE
+  - model_name: claude-sonnet-us
+    litellm_params:
+      model: bedrock/us.anthropic.claude-sonnet-5-5
+      aws_region_name: us-east-1
+
+router_settings:
+  fallbacks: [{"claude-sonnet": ["claude-sonnet-eu", "claude-sonnet-us"]}]
+  num_retries: 2                               # reintentos antes de pasar al fallback
+  allowed_fails: 3                             # fallos antes del cooldown de una deployment
+  cooldown_time: 30
+
+guardrails:
+  - guardrail_name: bedrock-corporativo
+    litellm_params:
+      guardrail: bedrock
+      mode: pre_call                           # permite enmascarar PII antes del modelo
+      guardrailIdentifier: gr-ops-retail       # ID del guardrail en Bedrock
+      guardrailVersion: "3"
+      aws_region_name: us-east-1
+
+litellm_settings:
+  callbacks: ["otel"]                          # trazas hacia el colector ADOT → CloudWatch
+  request_timeout: 120
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL        # RDS Postgres: claves, presupuestos, gasto
+```
+
+Cada agente recibe su **clave virtual** con modelos permitidos, presupuesto y límites. Se crea con la API de administración del proxy (o desde su UI) y se guarda en Secrets Manager:
+
+```bash title="crear_clave.sh"
+curl -s -X POST "$AI_GATEWAY_URL/key/generate" \
+  -H "Authorization: Bearer $LITELLM_MASTER_KEY" -H "Content-Type: application/json" \
+  -d '{"models": ["claude-sonnet"], "max_budget": 800, "budget_duration": "30d",
+       "tpm_limit": 400000, "rpm_limit": 300,
+       "metadata": {"agente": "asistente_operaciones", "centro_costo": "OPS-114"}}'
+```
+
+Detalles que marcan la diferencia en producción:
+
+- **Perfil de inferencia obligatorio.** Los Claude recientes en Bedrock solo se invocan on-demand mediante un perfil (`global.`, `us.`, `eu.`…). Con el ID base `anthropic.claude-sonnet-5-5` obtienes un error 400.
+- **`global.` vs geográfico.** `global.` cuesta cerca de un 10 % menos y tiene más capacidad, pero puede procesar en cualquier región comercial. Si un equipo tiene requisitos de residencia, dale una clave cuyo único modelo permitido sea el alias `eu.` y no lo encadenes con `global.`.
+- **Fallback ≠ residencia.** El fallback `global.` → `eu.` → `us.` del ejemplo es para **capacidad**. Para datos regulados, el orden se invierte o se elimina.
+- **Prompt caching.** El system prompt y las definiciones de herramientas de un agente son estables y largos: marcarlos como cacheables (TTL de 5 min o 1 h en Bedrock) reduce costo y latencia en cada turno del loop.
+- **Rechazo temprano.** Un presupuesto agotado devuelve un error explícito. Tu harness debe tratarlo como fallo no recuperable, no reintentarlo.
+
+<Callout type="danger" title="Seguridad de la cadena de suministro: litellm>=1.84">
+Las versiones **1.82.7 y 1.82.8** de LiteLLM publicadas en PyPI contenían código no autorizado (24 de marzo de 2026). Fija `litellm>=1.84` tanto en el agente como en la imagen del proxy, preferentemente por hash o digest de imagen, y **rota las credenciales** de cualquier entorno donde se hayan instalado esas versiones. El gateway concentra todas las credenciales de modelos: trátalo como infraestructura crítica.
+</Callout>
+
+## IAM: el rol del gateway
+
+El rol de las tareas ECS del proxy es el único con permisos de inferencia. Para un perfil `global.` la documentación de Bedrock exige **tres recursos**: el perfil en la región de origen, el modelo en esa región y el modelo "global" sin región. Para los perfiles geográficos, el modelo en **todas las regiones destino** del perfil:
+
+```json title="rol-ai-gateway.json"
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "PerfilGlobal",
+      "Effect": "Allow",
+      "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+      "Resource": "arn:aws:bedrock:us-east-1:111122223333:inference-profile/global.anthropic.claude-sonnet-5-5"
+    },
+    {
+      "Sid": "ModeloViaPerfiles",
+      "Effect": "Allow",
+      "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+      "Resource": [
+        "arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-5-5",
+        "arn:aws:bedrock:::foundation-model/anthropic.claude-sonnet-5-5"
+      ],
+      "Condition": { "StringLike": {
+        "bedrock:InferenceProfileArn": "arn:aws:bedrock:*:111122223333:inference-profile/*.anthropic.claude-sonnet-5-5"
+      } }
+    },
+    {
+      "Sid": "PerfilesGeograficos",
+      "Effect": "Allow",
+      "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+      "Resource": [
+        "arn:aws:bedrock:us-east-1:111122223333:inference-profile/us.anthropic.claude-sonnet-5-5",
+        "arn:aws:bedrock:eu-west-1:111122223333:inference-profile/eu.anthropic.claude-sonnet-5-5"
+      ]
+    },
+    {
+      "Sid": "Guardrail",
+      "Effect": "Allow",
+      "Action": "bedrock:ApplyGuardrail",
+      "Resource": "arn:aws:bedrock:us-east-1:111122223333:guardrail/*"
+    }
+  ]
+}
+```
+
+<Callout type="warning" title="Las SCP también cuentan">
+Si tu organización bloquea regiones con SCP, una llamada a `global.` puede fallar aunque el rol esté bien: Bedrock evalúa el modelo global con `aws:RequestedRegion = "unspecified"`. La documentación propone permitir `unspecified` o eximir por `bedrock:InferenceProfileArn`. Coordina con el equipo de cuentas antes del primer despliegue.
+</Callout>
+
+## Herramientas gobernadas: Gateway, Identity y Policy
+
+El segundo gateway es el de herramientas. AgentCore Gateway convierte APIs OpenAPI, Lambdas y servidores MCP en **un único endpoint MCP**, y desde marzo de 2026 (GA de Policy) cada llamada puede pasar por un **policy engine Cedar** evaluado **fuera del código del agente**:
+
+<Diagram id="adk-bedrock-herramientas" height={520} />
+
+```text title="policies/herramientas.cedar"
+// Consultas: cualquier usuario autenticado del IdP corporativo
+permit(
+  principal is AgentCore::OAuthUser,
+  action == AgentCore::Action::"Pedidos___consultar_pedido",
+  resource == AgentCore::Gateway::"arn:aws:bedrock-agentcore:us-east-1:111122223333:gateway/ops-retail"
+);
+
+// Notas de crédito: solo jefes de tienda y por debajo de 500
+permit(
+  principal is AgentCore::OAuthUser,
+  action == AgentCore::Action::"Pedidos___emitir_nota_credito",
+  resource == AgentCore::Gateway::"arn:aws:bedrock-agentcore:us-east-1:111122223333:gateway/ops-retail"
+) when {
+  principal.hasTag("role") && principal.getTag("role") == "jefe_tienda" &&
+  context.input.monto < 500
+};
+```
+
+Las acciones se nombran `NombreTarget___herramienta`, los claims del JWT llegan como *tags* del principal y `context.input` expone los argumentos de la llamada. Lo que no está permitido explícitamente queda denegado. Policy también admite autoría en lenguaje natural (que se traduce a Cedar y se valida) y condiciones sobre señales de Guardrails.
+
+**Identity** completa el cuadro: valida el token de entrada del Runtime y guarda las credenciales salientes (OAuth 2.0 o API keys de ServiceNow, Salesforce o tu ERP) en un *token vault*. El agente nunca ve esos secretos, y revocar el acceso de un agente es una operación de configuración, no un despliegue.
+
+## RAG con Bedrock Knowledge Bases
+
+Los procedimientos operativos, políticas de compensación y manuales de tienda viven en una **Knowledge Base**. Recomendaciones para esta arquitectura:
+
+- **Vector store**: OpenSearch Serverless si necesitas búsqueda **híbrida** (en Bedrock KB, `overrideSearchType: HYBRID` solo está disponible con OpenSearch con campo de texto filtrable); **S3 Vectors** si el volumen es grande y la consulta poco frecuente; pgvector en Aurora si ya operas Postgres.
+- **Reranking** (Amazon Rerank o Cohere Rerank 3.5) sobre los 20–30 primeros resultados y entrega de 5–8 al modelo.
+- **Filtros de metadatos** (`filter` en `vectorSearchConfiguration`) por país, línea de negocio o vigencia del documento, para que un jefe de tienda de Chile no reciba la política de Perú.
+- **Exponla como herramienta** a través del Gateway (Lambda que llama `Retrieve`, o el conector de Knowledge Base gestionada del Gateway, GA a mediados de 2026). Así el agente decide cuándo buscar (*agentic RAG*) y la consulta queda gobernada y auditada como cualquier otra tool.
+
+Profundizamos en chunking, contextual retrieval y evaluación de retrieval en [RAG](/guia/rag).
+
+## Observabilidad y evaluaciones
+
+**Trazas.** AgentCore Runtime configura el envío a CloudWatch al desplegar con la CLI; el agente debe emitir spans OpenTelemetry. Para que **AgentCore Evaluations** entienda las trazas de ADK, instrumenta con `openinference-instrumentation-google-adk` (la documentación pide `>= 0.1.13`). El gateway aporta la otra mitad: tokens, cache hits, costo y modelo efectivo por clave. Si el equipo de producto prefiere **Langfuse**, agrégalo como callback adicional del proxy o como segundo exportador OTel; no reemplaza a CloudWatch como fuente de auditoría.
+
+**Qué mirar en el dashboard**: tasa de éxito por tipo de tarea, turnos por sesión, costo por sesión, latencia p95 del primer token y total, denegaciones de Policy, intervenciones de Guardrails y fallbacks del gateway. Un aumento de fallbacks suele anticipar problemas de cuota antes de que los usuarios los noten.
+
+**Evaluaciones.** AgentCore Evaluations (GA el 31 de marzo de 2026) ofrece evaluadores integrados (`Builtin.Helpfulness` y otros) y personalizados con LLM-as-a-judge, en modo **online** (muestreo de tráfico real), **on-demand**, **batch** y sobre **datasets**. Úsalo en dos lugares: como **gate** de CI sobre un set dorado y como monitor continuo en producción.
+
+## Despliegue y CI/CD
+
+<Diagram id="adk-bedrock-cicd" height={520} />
+
+<Steps>
+
+1. **Local**: `agentcore dev` levanta el Runtime con hot reload y el inspector en el navegador. El agente apunta al gateway de desarrollo con una clave de bajo presupuesto.
+2. **PR**: prompts, herramientas, políticas Cedar, `agentcore.json` y la versión de dependencias cambian juntos. Un cambio de prompt se revisa como código.
+3. **CI**: tests de herramientas y de políticas, verificación de dependencias y `agentcore build`, que valida la spec del proyecto y genera artefactos.
+4. **Staging**: `agentcore deploy` (CDK por debajo) publica el Runtime en la cuenta de staging definida en `aws-targets.json`.
+5. **Gate de evals**: el set dorado se ejecuta varias veces por caso. Se bloquea la promoción si cae la tasa de éxito (mide **pass^k**, no solo pass@1), sube el costo por tarea o empeora la latencia.
+6. **Producción**: promoción con la versión anterior disponible para rollback; evals online y alarmas cierran el ciclo y alimentan el set dorado con fallos nuevos.
+
+</Steps>
+
+<Callout type="tip" title="Versiona el gateway con el mismo rigor">
+Un cambio en `config.yaml` (otro perfil, otro guardrail, otro orden de fallback) cambia el comportamiento de **todos** los agentes. Trátalo como un despliegue con su propio set de evals de humo y despliegue progresivo.
+</Callout>
+
+## Errores comunes
+
+<Callout type="danger" title="Usar el ID base del modelo">
+`bedrock/anthropic.claude-sonnet-5-5` devuelve 400. Usa siempre el ID del perfil (`global.`, `eu.`, `us.`) y da permisos IAM sobre el perfil **y** sobre el modelo en todas las regiones destino.
+</Callout>
+
+<Callout type="warning" title='Credenciales de Bedrock en el agente "por si acaso"'>
+Si el rol del Runtime conserva `bedrock:InvokeModel`, alguien terminará llamando a Bedrock directo y saltándose presupuestos, guardrails y logs. Quita el permiso y deja que el gateway sea el único camino.
+</Callout>
+
+<Callout type="warning" title="Crear Runner y sesión en cada invocación">
+El sample mínimo crea `InMemorySessionService` y `Runner` por llamada: sirve para una demo, pero pierde el historial entre turnos. Crea el `Runner` una vez por proceso y persiste la conversación en Memory.
+</Callout>
+
+<KeyPoints title="En resumen">
+
+- **ADK → LiteLLM → Bedrock** es la vía documentada; centralízala en un **LiteLLM Proxy** (Opción B) para claves virtuales, presupuestos, fallback y guardrails transversales.
+- Claude en Bedrock se invoca por **perfil de inferencia**; el rol del gateway necesita el perfil y los modelos en todas las regiones destino, y las SCP deben contemplarlo.
+- **AgentCore Runtime** aloja el agente con el patrón `BedrockAgentCoreApp` + `@app.entrypoint` alrededor del `Runner` de ADK.
+- Las herramientas pasan por **AgentCore Gateway** con **Identity** (secretos fuera del agente) y **Policy** en Cedar (decisiones deterministas fuera del modelo).
+- **Memory** reemplaza a `InMemorySessionService`; **Knowledge Bases** aporta RAG gobernado como herramienta.
+- Instrumenta con OpenTelemetry/OpenInference y usa **Evaluations** como gate de CI y monitor online. Fija `litellm>=1.84`.
+
+</KeyPoints>
+
+## Siguientes pasos
+
+<Cards cols={3}>
+  <Card title="Asistente de soporte con RAG y MCP" href="/guia/arquitectura-soporte-rag-mcp">La misma base aplicada a atención al cliente, con aprobación humana de reembolsos.</Card>
+  <Card title="Multiagente con A2A" href="/guia/arquitectura-multiagente-a2a">Un orquestador ADK que delega en especialistas, uno de ellos en Strands vía A2A.</Card>
+  <Card title="AWS Bedrock y AgentCore" href="/guia/aws-bedrock-agentcore">Cada componente de AgentCore en detalle, con estados y límites.</Card>
+  <Card title="Gateways" href="/guia/gateways">LLM gateways vs. gateways MCP, y cómo elegir entre LiteLLM, Kong, Cloudflare y otros.</Card>
+  <Card title="Google ADK" href="/guia/google-adk">Agentes, callbacks, sesiones y workflows en grafo de ADK 2.x.</Card>
+  <Card title="Evaluación y observabilidad" href="/guia/evaluacion-observabilidad">Sets dorados, pass^k, LLM-as-judge y trazas OTel GenAI.</Card>
+</Cards>

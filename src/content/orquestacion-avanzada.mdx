@@ -1,0 +1,272 @@
+Orquestar agentes en producción es mucho más que conectar un supervisor con tres especialistas. Hay que decidir **cuándo** vale la pena tener varios agentes, **cómo** se reparten el contexto, qué pasa cuando un proceso **cae a mitad de una tarea de dos horas**, cómo **pausar** para que una persona apruebe y cómo evitar que un error en un agente se **propague** por todo el sistema.
+
+Esta página asume que conoces los patrones básicos (chaining, routing, orquestador-workers, manager vs. handoffs) de [patrones de diseño](/guia/patrones-de-diseno) y la gestión de contexto de [context engineering](/guia/context-engineering).
+
+## ¿Cuándo vale la pena el multiagente?
+
+El dato más citado viene del sistema de investigación de Anthropic (junio de 2025): un orquestador con Claude Opus 4 y subagentes con Claude Sonnet 4 **superó en 90,2%** a un agente único con Opus 4 en su evaluación interna de investigación. El mismo artículo explica por qué, y el porqué es la clave de la decisión:
+
+- En su análisis, **el uso de tokens por sí solo explica el 80% de la varianza** en el rendimiento. El multiagente funciona, en buena parte, porque permite **gastar más tokens en paralelo**, cada subagente con su propia ventana.
+- Ese gasto es real: los agentes usan cerca de **4×** los tokens de un chat y los sistemas multiagente cerca de **15×**.
+- El paralelismo compensa en tiempo: el agente líder lanza **3–5 subagentes en paralelo**, lo que redujo el tiempo de investigación **hasta en 90%** en consultas complejas.
+
+<Callout type="warning" title="La pregunta económica">
+El multiagente tiene sentido cuando **el valor de la tarea justifica ~15× tokens**. Una investigación de due diligence, sí; responder "¿dónde está mi pedido?", no.
+</Callout>
+
+El multiagente encaja bien en tareas con **mucho paralelismo natural** (investigación "a lo ancho"), con información que **no cabe en una ventana** o con **muchas herramientas complejas** que conviene repartir. Encaja mal cuando **todos los agentes necesitan el mismo contexto** o hay **muchas dependencias** entre subtareas. Anthropic señala que la mayoría de las tareas de programación tienen menos partes realmente paralelizables que la investigación.
+
+Un recurso práctico del mismo artículo es **escalar el esfuerzo según la complejidad**, y decirlo explícitamente en el prompt del orquestador: una búsqueda de un dato simple requiere 1 agente con 3–10 llamadas a herramientas; una comparación directa, 2–4 subagentes con 10–15 llamadas cada uno; una investigación compleja, más de 10 subagentes con responsabilidades bien divididas.
+
+## Topologías multiagente
+
+<Diagram ids={["orquestacion-supervisor", "orquestacion-swarm"]} height={560} />
+
+| Topología | Cómo funciona | Fortalezas | Riesgos | Implementaciones |
+|---|---|---|---|---|
+| **Supervisor / orquestador-workers** | Un agente central planifica, delega y sintetiza | Control y trazas simples, una sola voz | Cuello de botella de contexto en el supervisor | ADK `AgentTool`, Strands agents-as-tools, LangGraph supervisor, Claude Agent SDK subagents |
+| **Jerárquica** | Supervisores de supervisores (por dominio) | Escala a muchos especialistas | Latencia y costo se multiplican por nivel | Subgrafos en LangGraph, agentes anidados en ADK |
+| **Swarm / handoffs** | Pares que se transfieren el control | Flexible, menos saltos por turno | Ping-pong, pérdida de visión global | Strands `Swarm`, handoffs del OpenAI Agents SDK, handoff en Microsoft Agent Framework |
+| **Grafo** | Nodos (agentes o funciones) y aristas explícitas, con ciclos y condiciones | Predecible, auditable, combina determinismo y LLM | Más diseño inicial | ADK 2.x `Workflow`, Strands `Graph`, LangGraph `StateGraph` |
+| **Federada (entre equipos)** | Agentes independientes que se descubren y delegan por protocolo | Sin compartir código ni memoria | Confianza, identidad, contratos | [A2A](/guia/a2a) v1.0 |
+
+En empresas, la topología más común en 2026 es un **grafo con nodos agénticos**: la estructura (qué pasos existen, dónde están las aprobaciones) es determinista y auditable, y dentro de algunos nodos un agente razona libremente. ADK 2.0 hizo de esto su modelo principal: los graph workflows reemplazan a los antiguos `SequentialAgent`/`ParallelAgent`/`LoopAgent` en Python y Go.
+
+### Swarm en Strands con límites de producción
+
+```python title="swarm_reclamos.py"
+from strands import Agent
+from strands.multiagent import Swarm
+
+MODEL = "global.anthropic.claude-sonnet-5-5"
+triage = Agent(name="triage", model=MODEL,
+    system_prompt="Entiende el reclamo y transfiere al especialista. No resuelvas tú.")
+logistica = Agent(name="logistica", model=MODEL, tools=[ver_despacho],
+    system_prompt="Verificas despachos y faltantes. Transfiere a facturación si hay cobros.")
+facturacion = Agent(name="facturacion", model=MODEL, tools=[ver_cobros],
+    system_prompt="Detectas cobros incorrectos. Transfiere a reembolsos para devolver.")
+reembolsos = Agent(name="reembolsos", model=MODEL, tools=[emitir_reembolso],
+    system_prompt="Emites reembolsos dentro de la política y respondes al cliente.")
+
+swarm = Swarm(
+    [triage, logistica, facturacion, reembolsos],
+    entry_point=triage,
+    max_handoffs=8,                         # por defecto 20: ajústalo a tu caso
+    max_iterations=12,
+    execution_timeout=300.0,                # 5 min para todo el swarm
+    node_timeout=90.0,                      # por agente
+    repetitive_handoff_detection_window=6,  # detección de ping-pong (desactivada por defecto)
+    repetitive_handoff_min_unique_agents=3,
+)
+
+result = swarm("Pedido 4512 llegó incompleto y me cobraron el envío dos veces")
+print(result.status)                                     # COMPLETED, FAILED…
+print(" → ".join(n.node_id for n in result.node_history))
+print(result.accumulated_usage)                          # tokens: vigila el costo
+```
+
+## Aislamiento de contexto entre agentes
+
+La ventaja estructural del multiagente es que **cada subagente tiene su propia ventana**. El supervisor no necesita ver las 40 consultas SQL que hizo el investigador; necesita su conclusión. Para aprovecharlo:
+
+<Steps>
+
+1. **Delegación con brief completo**: cada tarea delegada debe incluir **objetivo, formato de salida, guía sobre herramientas y fuentes, y límites claros** (la receta de Anthropic). Las instrucciones vagas producen subagentes que duplican trabajo o investigan lo que no era.
+2. **Resúmenes, no transcripciones**: el subagente devuelve una salida condensada. Si el supervisor recibe todo, perdiste la ventaja y pagas el contexto dos veces.
+3. **Artefactos fuera de banda**: para resultados grandes (un informe, un dataset), el subagente los escribe en almacenamiento externo (S3, una tabla, un sistema de archivos) y devuelve una **referencia**. Así evitas el "teléfono descompuesto" de pasar todo por el coordinador.
+4. **Herramientas mínimas por agente**: el investigador solo lee, el ejecutor solo escribe lo necesario. El aislamiento de contexto es también **aislamiento de privilegios**.
+
+</Steps>
+
+## Ejecución durable
+
+Un agente que trabaja durante minutos u horas **va a encontrarse con fallas**: un despliegue reinicia el contenedor, una API devuelve 503, se agota un rate limit. Anthropic lo dice sin rodeos: en agentes los errores se acumulan y reiniciar desde cero es caro y frustrante; por eso construyeron sistemas que **reanudan desde donde estaba el agente** cuando ocurrió el error, y despliegan con *rainbow deployments* (desplazar el tráfico gradualmente de la versión vieja a la nueva) para no cortar agentes en ejecución.
+
+La **ejecución durable** resuelve esto persistiendo cada paso completado:
+
+<Diagram id="orquestacion-durable" height={540} />
+
+| Opción | Modelo | Cuándo |
+|---|---|---|
+| **Temporal + OpenAI Agents SDK** | Integración GA desde el 23-03-2026: el loop del agente corre como *Workflow* y cada llamada al modelo como *Activity*, con reintentos y replay | Ya usas Temporal o necesitas flujos de días con señales |
+| **Pydantic AI v2** | Ejecución durable con Temporal, DBOS, Prefect o Restate | Stack Python tipado |
+| **AWS Step Functions** | Máquina de estados; pasos con reintentos declarativos; patrón `.waitForTaskToken` para esperar callbacks humanos o externos | Orquestación nativa AWS alrededor de agentes en Lambda o AgentCore Runtime |
+| **LangGraph checkpointers** | Estado persistido tras cada nodo (`PostgresSaver`); se reanuda por `thread_id` | El agente ya es un grafo LangGraph |
+| **Microsoft Agent Framework** | Workflows en grafo con checkpointing y HITL | Stack .NET/Azure |
+| **Cloudflare Agents SDK** | Cada agente es un Durable Object con estado y scheduler | Agentes en el edge |
+| **MCP Tasks** | Extensión oficial `io.modelcontextprotocol/tasks`: una herramienta larga devuelve una tarea que el cliente consulta (`tasks/get`) | Herramientas MCP que tardan minutos u horas |
+
+<Callout type="info" title="La regla de oro del replay">
+En un motor durable, el código del workflow debe ser **determinista**: todo lo no determinista (llamadas al LLM, APIs, hora actual, números aleatorios) va en *activities* cuyos resultados se registran. Así, al reanudar, el motor reproduce el historial sin volver a llamar al modelo ni repetir efectos.
+</Callout>
+
+## Human-in-the-loop
+
+La aprobación humana es el control más efectivo para acciones irreversibles o de alto riesgo, y la guía de OpenAI recomienda también activarla cuando se supera un **umbral de fallos** (el agente no logra resolver tras N intentos). Técnicamente, HITL es un caso particular de durabilidad: el flujo **se pausa, persiste su estado y se reanuda** cuando llega la respuesta.
+
+<CodeTabs labels={["LangGraph", "ADK 2.x"]}>
+
+```python title="aprobacion_langgraph.py"
+from typing import TypedDict
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import InMemorySaver   # en producción: PostgresSaver
+from langgraph.types import interrupt, Command
+
+class Caso(TypedDict):
+    cliente: str
+    monto_nc: float
+    decision: dict
+
+def aprobar(state: Caso):
+    if state["monto_nc"] <= 1000:                       # bajo el umbral: sin pausa
+        return {"decision": {"aprobado": True, "monto": state["monto_nc"]}}
+    # Pausa: persiste el estado y devuelve este payload a quien invocó el grafo
+    decision = interrupt({"pregunta": "¿Apruebas la nota de crédito?",
+                          "cliente": state["cliente"], "monto": state["monto_nc"]})
+    return {"decision": decision}
+
+def ejecutar(state: Caso):
+    if state["decision"]["aprobado"]:
+        erp.emitir_nc(state["cliente"], state["decision"]["monto"],
+                      idempotency_key=f"nc-{state['cliente']}-88123")
+    return {}
+
+builder = StateGraph(Caso)
+builder.add_node("aprobar", aprobar)
+builder.add_node("ejecutar", ejecutar)
+builder.add_edge(START, "aprobar")
+builder.add_edge("aprobar", "ejecutar")
+builder.add_edge("ejecutar", END)
+graph = builder.compile(checkpointer=InMemorySaver())
+
+config = {"configurable": {"thread_id": "disputa-88123"}}
+graph.invoke({"cliente": "Andina SpA", "monto_nc": 1450.0}, config)   # se pausa
+# ...horas después, desde la UI de aprobaciones (otro proceso, mismo thread_id):
+graph.invoke(Command(resume={"aprobado": True, "monto": 1200.0}), config)
+```
+
+```python title="aprobacion_adk.py"
+from google.adk import Agent, Workflow
+from google.adk.events import RequestInput
+
+propuesta = Agent(name="propuesta", model="gemini-flash-latest",
+    instruction="Propón la nota de crédito para la disputa, con monto y evidencia.")
+
+def pedir_aprobacion(node_input):
+    # Pausa el workflow hasta que una persona responda
+    yield RequestInput(message=f"¿Apruebas esta nota de crédito?\n{node_input}")
+
+def ejecutar(node_input):
+    # node_input es la respuesta humana
+    return f"Decisión registrada: {node_input}"
+
+root_agent = Workflow(
+    name="aprobacion_nc",
+    edges=[("START", propuesta, pedir_aprobacion, ejecutar)],
+)
+```
+
+</CodeTabs>
+
+En LangGraph, al reanudar, **el nodo interrumpido se vuelve a ejecutar desde el principio** y `interrupt()` devuelve el valor de `resume`. Por eso, cualquier efecto secundario antes del `interrupt` debe ser idempotente o moverse a otro nodo. En ADK 2.x, `RequestInput` también acepta `payload` y `response_schema` para estructurar la respuesta; la mecánica de reanudación está en la doc de *Resume Agents* de ADK.
+
+La pausa humana también existe **en los protocolos**, lo que permite HITL entre sistemas de distintos equipos:
+
+| Dónde ocurre la pausa | Mecanismo (octubre de 2026) |
+|---|---|
+| Dentro de tu grafo | LangGraph `interrupt()` + `Command(resume=...)`; ADK 2.x `RequestInput`; MS Agent Framework workflows |
+| En un agente remoto (A2A) | La tarea pasa a estado `INPUT_REQUIRED` (`TASK_STATE_INPUT_REQUIRED` en v1.0; o `AUTH_REQUIRED` si necesita credenciales); el cliente responde con un nuevo mensaje en la misma tarea |
+| En una herramienta MCP | **Elicitation** vía *Multi Round-Trip Requests* (MCP 2026-07-28): el servidor responde `resultType: "input_required"` con `inputRequests` y el cliente reintenta con `inputResponses` |
+| En un workflow AWS | Step Functions con `.waitForTaskToken`; la UI de aprobación llama a `SendTaskSuccess` o `SendTaskFailure` |
+
+<Callout type="tip" title="Diseña la experiencia del aprobador">
+Un HITL que muestra "¿Aprobar? Sí/No" sin contexto se convierte en un sello de goma. Muestra la acción exacta, la evidencia, el impacto y una opción para **editar** antes de aprobar. Y vigila el riesgo opuesto: aprobadores que confían ciegamente en el agente (*human-agent trust exploitation*, ASI09 en OWASP).
+</Callout>
+
+## Tareas largas y asíncronas
+
+Cuando una tarea dura más que una petición HTTP, el diseño cambia:
+
+- **Respuesta inmediata + seguimiento**: el agente acepta la tarea, devuelve un ID y notifica al terminar. En A2A, con streaming SSE (`SendStreamingMessage`, `SubscribeToTask`) o *push notifications* por webhook; en MCP, con la extensión Tasks.
+- **Progreso fuera de la ventana**: igual que en *Effective harnesses for long-running agents* de Anthropic, el agente mantiene un archivo de progreso, una lista de pendientes estructurada y commits o checkpoints, para que cada sesión retome donde quedó la anterior sin depender del historial completo.
+- **Trabajo incremental**: una unidad de trabajo por sesión o por paso, verificada antes de seguir. Los agentes que intentan hacerlo todo de una vez dejan estados a medias difíciles de recuperar.
+- **Runtimes para ejecuciones largas**: AgentCore Runtime (aislamiento por sesión en microVM y ejecuciones largas), Agent Runtime en Google Cloud o hosted agents en Microsoft Foundry evitan que tengas que gestionar procesos de larga vida.
+
+## Manejo de fallas
+
+En un sistema multiagente, una falla local se convierte fácilmente en una **falla en cascada**: un subagente devuelve datos erróneos con total seguridad, el supervisor los toma como ciertos y el redactor los presenta al cliente. OWASP lo recoge como **ASI08 (Cascading Failures)** en su Top 10 for Agentic Applications 2026.
+
+<Cards cols={2}>
+  <Card title="Reintentos acotados" tag="transitorios">
+    Backoff exponencial con jitter para 429/5xx, en la capa de activity o del gateway. Nunca reintentos infinitos ni reintentos de errores de validación.
+  </Card>
+  <Card title="Idempotencia" tag="efectos">
+    Toda acción de escritura con una clave de idempotencia. Con durabilidad y colas, "al menos una vez" es la norma: sin idempotencia, dos notas de crédito.
+  </Card>
+  <Card title="Presupuestos y límites" tag="costo">
+    Máximo de turnos, handoffs, subagentes, tiempo y dinero por tarea. Ej.: `max_handoffs` en Strands, `max_budget_usd` en el Claude Agent SDK, `max_budget` por clave virtual en LiteLLM.
+  </Card>
+  <Card title="Fallbacks de modelo" tag="disponibilidad">
+    Si un modelo o región falla, el [gateway](/guia/gateways) cambia a otro perfil (p. ej. `us.` → `eu.`). AgentCore Gateway agregó fallback de modelo en octubre de 2026.
+  </Card>
+  <Card title="Validación entre agentes" tag="confianza">
+    Trata la salida de otro agente como entrada no confiable: esquemas, verificación de citas, gates programáticos antes de actuar.
+  </Card>
+  <Card title="Degradación elegante" tag="experiencia">
+    Si un especialista falla, el supervisor responde con lo que tiene y lo dice, o escala a una persona, en vez de inventar.
+  </Card>
+</Cards>
+
+<Callout type="danger" title="El loop que nadie cortó">
+El incidente clásico: dos agentes que se transfieren un caso indefinidamente, o un evaluator-optimizer que nunca aprueba, consumiendo tokens toda la noche. Los límites duros no son opcionales: configúralos en el framework **y** en el gateway (presupuesto por clave virtual), y alerta por anomalías de consumo.
+</Callout>
+
+## Agentes dirigidos por eventos
+
+Muchos agentes empresariales no esperan a que alguien escriba en un chat: reaccionan a **eventos de negocio**. AWS Prescriptive Guidance describe esta arquitectura con Bedrock para el razonamiento, Lambda/ECS para herramientas, Step Functions para la orquestación y **EventBridge/SQS** para la mensajería:
+
+<Steps>
+
+1. **EventBridge** enruta eventos ("reclamo recibido", "factura rechazada", "alerta de stock") con reglas por tipo y contenido.
+2. **SQS** amortigua picos y desacopla: el agente consume a su ritmo, con *visibility timeout* mayor que la duración esperada de la tarea y una **cola de mensajes fallidos (DLQ)** para los casos que fallan repetidamente.
+3. Un **Step Functions** o un agente en **AgentCore Runtime** procesa el evento, con estado durable si la tarea es larga o requiere aprobación.
+4. El resultado se publica como **nuevo evento** ("reclamo resuelto"), que otros sistemas o agentes consumen.
+
+</Steps>
+
+Las entregas son "al menos una vez", así que la idempotencia vuelve a ser obligatoria. Y como no hay un usuario mirando, la observabilidad y las alertas (trazas por ejecución, tasa de DLQ, costo por evento) reemplazan al humano que detectaría un comportamiento extraño. Lo vemos en [evaluación y observabilidad](/guia/evaluacion-observabilidad).
+
+## Guía de decisión
+
+| Necesidad | Mecanismo recomendado |
+|---|---|
+| Tarea paralelizable de alto valor (investigación, due diligence) | Orquestador + subagentes en paralelo con contexto aislado |
+| Proceso con pasos y aprobaciones conocidos | Grafo (ADK 2.x `Workflow`, LangGraph, Strands `Graph`) con nodos agénticos |
+| Especialistas que llevan la conversación | Swarm / handoffs con límites y detección de ping-pong |
+| Agentes de otros equipos o proveedores | A2A con Agent Cards y tareas con estados |
+| Tareas de horas o días, o esperas humanas largas | Ejecución durable (Temporal, Step Functions, checkpointers) |
+| Acción irreversible o de alto monto | Gate determinista + HITL con contexto + idempotencia |
+| Herramienta que tarda minutos | MCP Tasks o patrón asíncrono con callback |
+| Reacción a eventos de negocio | EventBridge/SQS + DLQ + workflow durable |
+
+<KeyPoints>
+
+- El multiagente rinde porque **gasta más tokens en paralelo** (+90,2% en la eval de Anthropic, ~15× tokens): úsalo cuando el valor de la tarea lo justifique.
+- Elige la topología según el control que necesitas: **supervisor** (central), **swarm** (distribuido), **grafo** (estructura auditable con nodos agénticos).
+- Aísla el contexto: briefs completos, resúmenes de vuelta, artefactos por referencia y **mínimo privilegio** por agente.
+- Todo agente que dura más de una petición necesita **ejecución durable**: checkpoints, replay y activities para lo no determinista.
+- HITL = pausar, persistir, reanudar. Existe en frameworks (`interrupt`, `RequestInput`) y en protocolos (A2A `INPUT_REQUIRED`, MCP MRTR).
+- Contra las fallas en cascada: reintentos acotados, **idempotencia**, presupuestos y límites duros, fallbacks y validación entre agentes.
+
+</KeyPoints>
+
+## Siguientes pasos
+
+<Cards cols={3}>
+  <Card title="Arquitectura multiagente con A2A" href="/guia/arquitectura-multiagente-a2a">Una arquitectura de referencia con orquestador y especialistas federados.</Card>
+  <Card title="Evaluación y observabilidad" href="/guia/evaluacion-observabilidad">Evals de trayectoria y trazas de sistemas multiagente.</Card>
+  <Card title="Seguridad y gobernanza" href="/guia/seguridad-gobernanza">Identidad de agentes, mínimo privilegio y OWASP agéntico.</Card>
+  <Card title="LangGraph" href="/guia/langgraph">Checkpointers, interrupts y grafos con estado.</Card>
+  <Card title="AWS Bedrock y AgentCore" href="/guia/aws-bedrock-agentcore">Runtime, Memory, Gateway y Policy para agentes en AWS.</Card>
+  <Card title="A2A" href="/guia/a2a">Tareas, estados y delegación entre agentes de distintos equipos.</Card>
+</Cards>

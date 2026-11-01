@@ -1,0 +1,125 @@
+import type { IsoSpec } from '../components/iso/types'
+
+export const incidentesTopologia: IsoSpec = {
+  id: 'incidentes-topologia',
+  title: 'Topología y descubrimiento del sistema de incidentes',
+  summary:
+    'Un **orquestador ADK** coordina especialistas. Los de **logs**, **métricas** y **runbooks** son sub-agentes del mismo equipo y corren junto al orquestador; el de **remediación** es de otro equipo, está hecho en **Strands** y se consume por **A2A** tras descubrirlo en el **registro de agentes**.',
+  height: 500,
+  zones: [
+    { id: 'sre', label: 'Runtime SRE (ADK)', from: [1.9, -4.9], to: [8.3, 4.9], tone: 'agent' },
+    { id: 'plat', label: 'Runtime Plataforma (Strands · A2A)', from: [8.8, -4.9], to: [15.4, -1.9], tone: 'protocol' },
+  ],
+  nodes: [
+    { id: 'alarma', label: 'Alarma', sub: 'CloudWatch / PagerDuty', at: [0, 0], shape: 'box', tone: 'infra', icon: 'flag', info: 'El disparador: una alarma de latencia p99 del servicio *checkout* abre el incidente y llama al orquestador con el contexto de la alarma.' },
+    { id: 'registro', label: 'Agent Registry', sub: 'Agent Cards aprobadas', at: [0, -3.4], shape: 'box', tone: 'protocol', icon: 'list', info: 'Catálogo gobernado de agentes y servidores MCP (AWS Agent Registry en AgentCore o Agent Registry de Google). Guarda Agent Cards aprobadas: skills, endpoint y esquema de autenticación.' },
+    { id: 'oncall', label: 'SRE on-call', sub: 'aprueba acciones', at: [0, 3.4], shape: 'person', tone: 'user', icon: 'user', info: 'Recibe el diagnóstico y aprueba (o rechaza) la remediación propuesta. Puede intervenir en cualquier momento desde Slack/Teams.' },
+    { id: 'orq', label: 'Orquestador', sub: 'Google ADK', at: [3.8, 0], shape: 'tall', tone: 'agent', icon: 'workflow', info: 'Planifica la investigación, delega en especialistas, consolida hipótesis y gestiona el presupuesto de costo/tiempo del incidente. No tiene permisos de escritura sobre la infraestructura.' },
+    { id: 'logs', label: 'Agente de logs', sub: 'CloudWatch Logs', at: [6.8, -3.4], shape: 'tall', tone: 'agent', icon: 'search', scale: 0.85, info: 'Sub-agente ADK con herramientas de solo lectura (Logs Insights vía MCP). Devuelve patrones de error, primeras apariciones y servicios afectados, no volcados de logs.' },
+    { id: 'metricas', label: 'Agente de métricas', sub: 'CloudWatch / Prometheus', at: [6.8, 0], shape: 'tall', tone: 'agent', icon: 'chart', scale: 0.85, info: 'Sub-agente ADK que correlaciona métricas: latencia, errores, saturación, despliegues recientes. Solo lectura.' },
+    { id: 'runbooks', label: 'Agente de runbooks', sub: 'RAG', at: [6.8, 3.4], shape: 'tall', tone: 'agent', icon: 'book', scale: 0.85, info: 'Busca runbooks y postmortems similares y propone pasos de mitigación conocidos, con cita al documento.' },
+    { id: 'kb', label: 'Runbooks y postmortems', sub: 'Knowledge Base', at: [10.4, 3.4], shape: 'stack', tone: 'data', icon: 'scroll', info: 'Índice de runbooks, postmortems y diagramas de servicio. Fuente curada: solo se ingesta desde el repositorio de documentación de SRE.' },
+    { id: 'remed', label: 'Agente remediación', sub: 'Strands · A2A :9000', at: [10.4, -3.4], shape: 'tall', tone: 'agent', icon: 'wrench', info: 'Servidor A2A en AgentCore Runtime (puerto 9000, raíz `/`). Publica su Agent Card en `/.well-known/agent-card.json` con skills como *rollback de despliegue* o *escalar servicio ECS*.' },
+    { id: 'aws', label: 'APIs de infra', sub: 'ECS · SSM · CodeDeploy', at: [13.9, -3.4], shape: 'box', tone: 'tool', icon: 'server', info: 'Solo el agente de remediación tiene permisos de escritura, y acotados a acciones de runbook en servicios etiquetados.' },
+  ],
+  edges: [
+    { from: 'alarma', to: 'orq' },
+    { from: 'orq', to: 'registro', route: 'z', label: 'descubrir' },
+    { from: 'orq', to: 'logs' },
+    { from: 'orq', to: 'metricas' },
+    { from: 'orq', to: 'runbooks' },
+    { from: 'runbooks', to: 'kb' },
+    { from: 'orq', to: 'remed', route: 'arc', label: 'A2A' },
+    { from: 'remed', to: 'aws' },
+    { from: 'orq', to: 'oncall', route: 'z' },
+  ],
+  steps: [
+    { title: 'Disparador', body: 'La alarma de latencia de *checkout* invoca al orquestador con el contexto: servicio, métrica, umbral y hora de inicio.', flows: ['alarma>orq'] },
+    { title: 'Especialistas internos', body: 'Logs, métricas y runbooks son del mismo equipo, comparten despliegue y ciclo de vida: se modelan como **sub-agentes ADK** (o agentes como herramienta), sin protocolo de red de por medio.', flows: ['orq>logs', 'orq>metricas', 'orq>runbooks'] },
+    { title: 'Conocimiento operativo', body: 'El agente de runbooks consulta la base de runbooks y postmortems para proponer mitigaciones con precedente.', flows: ['runbooks>kb'] },
+    { title: 'Descubrimiento', body: 'Para remediar, el orquestador busca en el **registro** un agente con la skill *rollback de despliegue ECS*. Obtiene su Agent Card aprobada: endpoint, skills y autenticación OAuth.', flows: ['orq>registro', 'registro>orq'] },
+    { title: 'Agente de otro equipo vía A2A', body: 'El agente de remediación lo opera Plataforma, está en Strands y tiene su propio runtime. El orquestador le envía una **tarea A2A**; no comparten código, memoria ni credenciales.', flows: ['orq>remed'] },
+    { title: 'Acción acotada', body: 'Solo remediación puede escribir en la infraestructura, y únicamente tras la aprobación del on-call.', flows: ['orq>oncall', 'remed>aws'] },
+  ],
+}
+
+export const incidentesRecorrido: IsoSpec = {
+  id: 'incidentes-recorrido',
+  title: 'Un incidente de punta a punta',
+  summary:
+    'De la alarma al cierre: investigación en paralelo, hipótesis, runbook, plan de remediación por **A2A** con streaming, **aprobación humana**, ejecución acotada y verificación. Cada salto propaga el `traceparent` para tener una sola traza distribuida.',
+  height: 500,
+  nodes: [
+    { id: 'alarma', label: 'Alarma p99', sub: 'checkout > 2 s', at: [0, 0], shape: 'box', tone: 'infra', icon: 'flag', info: 'Abre el incidente INC-2291 con severidad 2 y un presupuesto de investigación (p. ej. 15 minutos y USD 3 en modelos).' },
+    { id: 'orq', label: 'Orquestador', sub: 'ADK', at: [3.4, 0], shape: 'tall', tone: 'agent', icon: 'workflow', info: 'Mantiene el estado del incidente: hipótesis, evidencia, acciones propuestas y presupuesto consumido.' },
+    { id: 'logs', label: 'Logs', sub: 'solo lectura', at: [6.8, -3.4], shape: 'tall', tone: 'agent', icon: 'search', scale: 0.85, info: 'Encuentra un pico de `ConnectionPoolTimeout` desde las 14:02 en *checkout*.' },
+    { id: 'metricas', label: 'Métricas', sub: 'solo lectura', at: [6.8, 0], shape: 'tall', tone: 'agent', icon: 'chart', scale: 0.85, info: 'Correlaciona el inicio con el despliegue v412 de *checkout* a las 14:00 y conexiones a la base saturadas.' },
+    { id: 'runbooks', label: 'Runbooks', sub: 'RAG', at: [6.8, 3.4], shape: 'tall', tone: 'agent', icon: 'book', scale: 0.85, info: 'Recupera el runbook "Regresión tras despliegue" y un postmortem de marzo con el mismo patrón: rollback como primera mitigación.' },
+    { id: 'remed', label: 'Remediación', sub: 'Strands · A2A', at: [10.4, 0], shape: 'tall', tone: 'agent', icon: 'wrench', info: 'Recibe la tarea, valida precondiciones (¿existe v411 sana?, ¿hay otro despliegue en curso?), propone un plan y queda en `INPUT_REQUIRED` hasta recibir la aprobación.' },
+    { id: 'aprobacion', label: '¿Aprobado?', sub: 'on-call', at: [10.4, 3.4], shape: 'diamond', tone: 'guard', icon: 'hand', info: 'El on-call ve el plan, la evidencia y el impacto estimado. Aprueba con un clic; la aprobación queda firmada y auditada.' },
+    { id: 'servicio', label: 'Servicio checkout', sub: 'ECS · CodeDeploy', at: [13.8, 0], shape: 'box', tone: 'tool', icon: 'server', info: 'Rollback a v411 con CodeDeploy. El agente verifica después que la latencia vuelva bajo el umbral.' },
+    { id: 'trazas', label: 'Traza distribuida', sub: 'OTel · traceparent', at: [3.4, -3.4], shape: 'box', tone: 'infra', icon: 'eye', info: 'Una sola traza para todo el incidente: spans del orquestador, de cada sub-agente, del salto A2A y de las llamadas a herramientas, unidos por el mismo `trace_id`.' },
+  ],
+  edges: [
+    { from: 'alarma', to: 'orq' },
+    { from: 'orq', to: 'logs' },
+    { from: 'orq', to: 'metricas' },
+    { from: 'orq', to: 'runbooks' },
+    { from: 'orq', to: 'remed', route: 'arc', label: 'A2A' },
+    { from: 'remed', to: 'aprobacion', route: 'z' },
+    { from: 'remed', to: 'servicio' },
+    { from: 'orq', to: 'trazas', route: 'z', dashed: true },
+  ],
+  steps: [
+    { title: '1 · Alarma', body: 'La latencia p99 de *checkout* supera 2 s. Se abre INC-2291 y se invoca al orquestador con un presupuesto de tiempo y costo.', flows: ['alarma>orq'] },
+    { title: '2 · Investigación en paralelo', body: 'El orquestador lanza logs y métricas **en paralelo** con instrucciones acotadas ("ventana 13:45–14:30, servicio checkout"). Cada uno devuelve un resumen, no datos crudos.', flows: ['orq>logs', 'orq>metricas', 'logs>orq', 'metricas>orq'] },
+    { title: '3 · Hipótesis', body: 'Timeouts del pool de conexiones desde 14:02 + despliegue v412 a las 14:00 → hipótesis principal: regresión introducida por v412.', focus: ['orq', 'logs', 'metricas'] },
+    { title: '4 · Runbook', body: 'El agente de runbooks encuentra el procedimiento de regresión post-despliegue y un postmortem similar: rollback primero, análisis después.', flows: ['orq>runbooks', 'runbooks>orq'] },
+    { title: '5 · Tarea A2A con streaming', body: 'El orquestador envía `SendStreamingMessage` al agente de remediación. Recibe actualizaciones (`WORKING`: validando precondiciones) y luego `INPUT_REQUIRED` con el plan: rollback a v411.', flows: ['orq>remed', 'remed>orq'] },
+    { title: '6 · Aprobación humana', body: 'El plan llega al on-call con evidencia e impacto. Aprueba; la aprobación vuelve a la misma tarea A2A como un nuevo mensaje.', flows: ['remed>aprobacion', 'aprobacion>remed'] },
+    { title: '7 · Ejecución acotada', body: 'Remediación ejecuta el rollback con su propio rol (solo acciones de runbook sobre servicios etiquetados) y emite un **artifact** con el resultado. La tarea pasa a `COMPLETED`.', flows: ['remed>servicio', 'remed>orq'] },
+    { title: '8 · Verificación y cierre', body: 'El orquestador pide a métricas confirmar la recuperación, redacta el resumen del incidente y deja el borrador del postmortem. Toda la secuencia está en una traza.', flows: ['orq>metricas', 'orq>trazas'] },
+  ],
+}
+
+export const incidentesConfianza: IsoSpec = {
+  id: 'incidentes-confianza',
+  title: 'Fronteras de confianza e identidad por agente',
+  summary:
+    'Cada agente tiene **su propia identidad** y **sus propios permisos**. Cruzar de un runtime a otro exige un token OAuth con audiencia y scopes específicos; las acciones sobre infraestructura pasan por un gateway con políticas. Comprometer un agente no compromete a los demás.',
+  height: 480,
+  zones: [
+    { id: 'idp', label: 'Identidad corporativa', from: [-1.5, -1.5], to: [1.5, 4.9], tone: 'guard' },
+    { id: 'sre', label: 'Cuenta SRE', from: [1.9, -1.5], to: [5.1, 4.9], tone: 'agent' },
+    { id: 'plat', label: 'Cuenta Plataforma', from: [5.5, -4.9], to: [12.3, 4.9], tone: 'protocol' },
+  ],
+  nodes: [
+    { id: 'idp', label: 'IdP', sub: 'Entra ID / Okta / Cognito', at: [0, 0], shape: 'box', tone: 'guard', icon: 'key', info: 'Emite tokens M2M (client credentials) para cada agente y tokens de usuario para el on-call. Cada agente es un cliente OAuth distinto.' },
+    { id: 'humano', label: 'SRE on-call', sub: 'aprobador', at: [0, 3.4], shape: 'person', tone: 'user', icon: 'user', info: 'Su identidad, no la del agente, queda registrada como autora de la aprobación.' },
+    { id: 'orq', label: 'Orquestador', sub: 'rol: solo lectura', at: [3.5, 0], shape: 'tall', tone: 'agent', icon: 'workflow', info: 'Rol IAM de solo lectura (logs, métricas, KB). Token OAuth con scope `remediation:request`: puede **pedir** remediaciones, no ejecutarlas.' },
+    { id: 'rolorq', label: 'Rol IAM SRE', sub: 'Read* sobre observabilidad', at: [3.5, 3.4], shape: 'box', tone: 'infra', icon: 'lock', info: 'Permisos de lectura sobre CloudWatch Logs, métricas y la Knowledge Base. Nada de `ecs:Update*` ni `ssm:SendCommand`.' },
+    { id: 'authz', label: 'Autorizador JWT', sub: 'audiencia + scopes', at: [7, 0], shape: 'diamond', tone: 'guard', icon: 'shield', info: 'El Runtime del agente de remediación valida firma, emisor, audiencia y cliente permitido (`allowedClients`) antes de que el mensaje A2A llegue al contenedor.' },
+    { id: 'remed', label: 'Remediación', sub: 'Strands · A2A', at: [10.5, 0], shape: 'tall', tone: 'agent', icon: 'wrench', info: 'Su propio rol y su propio cliente OAuth. Acepta tareas solo de clientes aprobados y exige una aprobación humana verificable antes de actuar.' },
+    { id: 'gw', label: 'Gateway + Cedar', sub: 'acciones de runbook', at: [10.1, -3.7], shape: 'hex', tone: 'protocol', icon: 'scroll', info: 'Las herramientas de escritura (rollback, escalar servicio) pasan por AgentCore Gateway con políticas Cedar: qué servicio, qué acción y bajo qué condiciones.' },
+    { id: 'rolremed', label: 'Rol IAM remediación', sub: 'solo servicios etiquetados', at: [10.5, 3.4], shape: 'box', tone: 'infra', icon: 'lock', info: 'Permisos de escritura limitados con condiciones por tag (`aws:ResourceTag/agent-managed = true`) y sin acceso a datos de negocio.' },
+    { id: 'audit', label: 'Auditoría', sub: 'CloudTrail + trazas', at: [7, -3.4], shape: 'box', tone: 'infra', icon: 'eye', info: 'CloudTrail registra cada llamada con el rol del agente; las trazas OTel vinculan esa llamada con el incidente y la aprobación humana.' },
+  ],
+  edges: [
+    { from: 'idp', to: 'orq', label: 'token M2M' },
+    { from: 'orq', to: 'rolorq', route: 'z' },
+    { from: 'orq', to: 'authz', label: 'A2A + Bearer' },
+    { from: 'authz', to: 'remed' },
+    { from: 'remed', to: 'gw', route: 'z' },
+    { from: 'remed', to: 'rolremed', route: 'z' },
+    { from: 'humano', to: 'idp', route: 'z' },
+    { from: 'gw', to: 'audit', dashed: true },
+  ],
+  steps: [
+    { title: '1 · Identidad por agente', body: 'Orquestador y remediación son **clientes OAuth distintos** en el IdP y tienen **roles IAM distintos**. Nunca comparten credenciales ni un "rol de agentes" genérico.', flows: ['idp>orq'], focus: ['orq', 'remed', 'idp'] },
+    { title: '2 · Mínimo privilegio del orquestador', body: 'El orquestador puede leer logs, métricas y runbooks. No puede tocar la infraestructura, aunque un prompt malicioso en un log se lo pida.', flows: ['orq>rolorq'] },
+    { title: '3 · Cruce de frontera', body: 'Para delegar, presenta un token con audiencia del Runtime de remediación y scope `remediation:request`. El autorizador JWT lo valida antes de que el mensaje llegue al agente.', flows: ['orq>authz', 'authz>remed'] },
+    { title: '4 · Aprobación con identidad humana', body: 'La aprobación la emite el on-call con **su** identidad. Remediación verifica que exista y corresponda a la tarea antes de ejecutar.', flows: ['humano>idp'], focus: ['humano', 'remed'] },
+    { title: '5 · Acción gobernada', body: 'El rollback pasa por el gateway con políticas Cedar y se ejecuta con el rol de remediación, limitado a servicios etiquetados.', flows: ['remed>gw', 'remed>rolremed'] },
+    { title: '6 · Auditoría de punta a punta', body: 'CloudTrail y las trazas permiten responder quién pidió, quién aprobó, qué agente ejecutó y con qué permisos.', flows: ['gw>audit'] },
+  ],
+}

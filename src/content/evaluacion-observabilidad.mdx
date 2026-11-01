@@ -1,0 +1,325 @@
+Un agente que "funciona en la demo" no es un agente que funciona. Como el modelo decide la ruta en cada ejecución, la misma petición puede resolverse bien nueve veces y mal la décima, y un cambio inocente —una descripción de herramienta, una versión de modelo, un párrafo del prompt— puede romper casos que antes pasaban. **Evaluar** es la forma de saber si el agente hace lo que debe; **observar** es la forma de saber qué hizo realmente en producción. Ambas disciplinas comparten datos (las trazas) y se alimentan mutuamente.
+
+## Por qué evaluar agentes es distinto
+
+Evaluar una llamada a un LLM es relativamente simple: entrada → salida → comparar. Un agente agrega tres complicaciones:
+
+- **No determinismo compuesto.** Cada turno del loop es una decisión probabilística; un error temprano (elegir mal una herramienta) se propaga.
+- **Efectos en el entorno.** El agente no solo responde: crea tickets, modifica registros, envía correos. Lo que importa es el **estado final**, no lo que el agente *dice* que hizo.
+- **Muchos caminos válidos.** Dos trayectorias distintas pueden llegar al mismo resultado correcto. Exigir una secuencia exacta de pasos castiga soluciones legítimas.
+
+Por eso Anthropic, en *Demystifying evals for AI agents* (9 de enero de 2026), propone un vocabulario específico que conviene adoptar tal cual en el equipo.
+
+### Vocabulario mínimo
+
+| Término | Qué es | Ejemplo (agente de soporte retail) |
+|---|---|---|
+| **Task** (tarea) | Un caso de prueba con entradas y criterios de éxito definidos | "Cliente reclama pedido 4512 retrasado; debe quedar un ticket prioridad alta y ofrecerse envío gratis" |
+| **Trial** | Un intento de resolver una tarea. Se corren varios porque las salidas varían | 3 ejecuciones de la misma tarea |
+| **Transcript** (trace / trajectory) | El registro completo de un trial: mensajes, tool calls, razonamiento, resultados intermedios | La conversación + las 4 llamadas a herramientas |
+| **Outcome** | El estado final del entorno tras el trial | ¿Existe el ticket en la BD con prioridad `alta`? |
+| **Grader** | Lógica que puntúa un aspecto del desempeño; una tarea puede tener varios | Un check de BD + un juez LLM de tono |
+| **Evaluation harness** | La infraestructura que corre las evals de punta a punta y agrega resultados | Un job de pytest en CI |
+| **Agent harness** | El sistema que convierte al modelo en agente (el loop, las tools) | Tu código ADK o Strands |
+| **Suite** | Un conjunto de tareas que mide una capacidad o comportamiento | "Reclamos de logística", "Seguridad y rechazos" |
+
+Un matiz importante del mismo artículo: cuando evalúas "un agente" estás evaluando **modelo y agent harness juntos**. Cambiar de framework o de prompt es cambiar el sistema bajo prueba.
+
+## El ciclo de evaluación
+
+Las evals no son una fase previa al lanzamiento; son un ciclo que conecta desarrollo y producción. Recorre el diagrama paso a paso:
+
+<Diagram id="evaluacion-ciclo" />
+
+### Graders: código, modelo y humanos
+
+| Tipo | Ejemplos | Fortalezas | Debilidades |
+|---|---|---|---|
+| **Código** | Comparar strings, validar JSON, consultar el estado de la BD, verificar qué tools se llamaron | Rápido, barato, objetivo, reproducible | Frágil ante variaciones válidas; no capta matices |
+| **Modelo** (LLM-as-judge) | Rúbricas, aserciones en lenguaje natural, comparación por pares, consenso de varios jueces | Flexible, escala, maneja texto libre | No determinista, más caro, **requiere calibración** |
+| **Humano** | Revisión experta, spot-checks, A/B tests | Estándar de oro; calibra a los otros | Lento, caro, difícil de escalar |
+
+La regla práctica: usa **graders de código siempre que el criterio sea verificable** (el outcome casi siempre lo es) y reserva el juez LLM para lo que no se puede comprobar con código: tono, completitud, fidelidad a las fuentes, cumplimiento de política.
+
+<Callout type="warning" title="Un juez LLM sin calibrar es una opinión, no una métrica">
+Antes de confiar en un juez, etiqueta a mano 30–50 transcripts y mide cuánto coincide con las personas. Usa una rúbrica explícita con criterios binarios o escalas cortas, pide la justificación **antes** del puntaje, fija la temperatura en 0 y, si puedes, usa un modelo distinto al del agente. Recalibra cuando cambies de modelo juez.
+</Callout>
+
+### Capacidad vs. regresión
+
+- **Evals de capacidad**: ¿qué puede hacer bien el agente? Deben empezar con **tasa de éxito baja**: son la meta hacia la que se mejora.
+- **Evals de regresión**: ¿sigue haciendo lo que ya hacía? Deben estar **cerca del 100%** y bloquear despliegues si bajan.
+
+Cuando una tarea de capacidad pasa consistentemente, se "gradúa" a la suite de regresión. Cuando una suite completa llega al 100% (saturación), deja de dar señal para mejorar: hay que agregar tareas más difíciles.
+
+### pass@k vs. pass^k: la métrica que cambia la conversación
+
+Como cada trial es aleatorio, hay dos maneras de resumir *k* intentos:
+
+- **pass@k**: probabilidad de que **al menos uno** de *k* trials tenga éxito. Sube con *k*. Sirve cuando basta con un éxito (por ejemplo, generar candidatos que luego filtra un humano).
+- **pass^k**: probabilidad de que **todos** los *k* trials tengan éxito. Baja con *k*. Es la que importa para agentes de cara al cliente, donde cada usuario es "un trial".
+
+El ejemplo del artículo de Anthropic lo deja claro: un agente con **75% de éxito por intento** tiene una probabilidad de pasar 3 de 3 de 0,75³ ≈ **42%**. Un "75%" en el dashboard puede significar que casi 6 de cada 10 clientes recurrentes verán al menos un fallo.
+
+<Callout type="tip" title="Reporta las dos">
+Muestra pass@1 (tasa media) y pass^k para k = 3 o 5 en cada reporte. Una brecha grande entre ambas indica **inconsistencia**: el agente sabe resolver la tarea, pero no siempre lo hace. Eso suele arreglarse con mejores descripciones de herramientas o instrucciones más precisas, no con un modelo más grande.
+</Callout>
+
+## Cómo construir tu primera suite
+
+<Steps>
+
+1. **Empieza con 20–50 tareas sacadas de fallos reales.** No necesitas cientos. Toma las verificaciones manuales que ya haces antes de cada release y los casos reportados en la mesa de ayuda o el bug tracker.
+2. **Escribe criterios de éxito verificables.** "El ticket queda con prioridad alta y la categoría `logistica`" es evaluable; "responde bien" no lo es.
+3. **Balancea casos positivos y negativos.** Incluye tareas donde el agente **no** debe actuar (pedir un reembolso fuera de plazo, una pregunta fuera de alcance). Si solo pruebas que actúe, optimizarás un agente que actúa de más.
+4. **Evalúa el resultado, no el camino.** Comprueba el outcome y deja libertad en la trayectoria. Usa crédito parcial en tareas de varios pasos.
+5. **Corre varios trials por tarea** y calcula pass@k y pass^k.
+6. **Lee transcripts.** Es la única forma de saber si un fallo es del agente o del grader que rechazó una solución válida.
+
+</Steps>
+
+Anthropic cuenta que su sistema multiagente de investigación arrancó con unas **20 consultas** representativas y un juez LLM: con pocos casos ya se ven los cambios grandes, que es lo que importa al principio.
+
+### Un harness mínimo con pytest y juez LLM
+
+El siguiente ejemplo evalúa un agente de soporte con dos graders por trial —uno de código sobre el outcome y uno LLM con rúbrica— y exige pass^3 para considerar la tarea aprobada. `run_agent` representa tu punto de entrada (ADK, Strands o el que uses) y debe devolver la respuesta y el estado final del entorno de prueba.
+
+```python title="tests/test_soporte_evals.py"
+import json, pathlib
+import boto3, pytest
+from soporte.agent import run_agent   # tu agente: devuelve .answer y .state
+
+bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
+JUDGE_MODEL = "global.anthropic.claude-sonnet-5-5"   # perfil de inferencia
+TRIALS = 3
+TASKS = [json.loads(l) for l in pathlib.Path("evals/soporte.jsonl")
+         .read_text(encoding="utf-8").splitlines() if l.strip()]
+
+RUBRIC = """Eres un evaluador estricto de un agente de soporte retail.
+Criterios binarios (0 o 1):
+- resuelve: responde exactamente lo que pidió el cliente.
+- fiel: no afirma nada que no esté en <datos>.
+- politica: no ofrece compensaciones fuera de <politica>.
+Primero razona en "razon"; después puntúa. Responde SOLO JSON:
+{"razon": "...", "resuelve": 0, "fiel": 0, "politica": 0}"""
+
+def judge(task: dict, answer: str) -> dict:
+    prompt = (f"{RUBRIC}\n<datos>{json.dumps(task['context'], ensure_ascii=False)}</datos>"
+              f"\n<politica>{task['policy']}</politica>"
+              f"\n<pregunta>{task['input']}</pregunta>\n<respuesta>{answer}</respuesta>")
+    resp = bedrock.converse(modelId=JUDGE_MODEL,
+                            messages=[{"role": "user", "content": [{"text": prompt}]}],
+                            inferenceConfig={"temperature": 0})
+    return json.loads(resp["output"]["message"]["content"][0]["text"])
+
+@pytest.mark.parametrize("task", TASKS, ids=lambda t: t["id"])
+def test_tarea(task):
+    passed = 0
+    for _ in range(TRIALS):
+        result = run_agent(task["input"], fixtures=task["context"])  # entorno limpio
+        outcome_ok = result.state.get("ticket") == task["expected"]["ticket"]  # grader de código
+        verdict = judge(task, result.answer)                                    # grader LLM
+        if outcome_ok and all(verdict[k] == 1 for k in ("resuelve", "fiel", "politica")):
+            passed += 1
+    assert passed == TRIALS, f"{task['id']}: {passed}/{TRIALS} trials (pass^{TRIALS} falló)"
+```
+
+En un proyecto real conviene guardar cada transcript y cada veredicto como artefacto del job de CI, para poder leerlos cuando un caso falla.
+
+### Lo mismo con las herramientas del framework
+
+No siempre hace falta escribir el harness desde cero. Google ADK trae evaluación integrada: archivos `.test.json` (una sesión) o `.evalset.json` (varias), criterios configurables y ejecución por CLI o pytest.
+
+<CodeTabs labels={["adk eval (CLI)", "test_config.json", "pytest + AgentEvaluator"]}>
+
+```bash title="terminal"
+# Corre un eval set contra el agente del directorio soporte_agent
+adk eval \
+    soporte_agent \
+    soporte_agent/reclamos_logistica.evalset.json \
+    --config_file_path=soporte_agent/test_config.json \
+    --print_detailed_results
+```
+
+```json title="soporte_agent/test_config.json"
+{
+  "criteria": {
+    "tool_trajectory_avg_score": 0.8,
+    "response_match_score": 0.7,
+    "hallucinations_v1": 0.9
+  }
+}
+```
+
+```python title="tests/integration/test_soporte.py"
+import pytest
+from google.adk.evaluation.agent_evaluator import AgentEvaluator
+
+@pytest.mark.asyncio
+async def test_reclamos_logistica():
+    await AgentEvaluator.evaluate(
+        agent_module="soporte_agent",
+        eval_dataset_file_path_or_dir="tests/integration/fixture/reclamos.test.json",
+    )
+```
+
+</CodeTabs>
+
+Sin `test_config.json`, ADK usa por defecto `tool_trajectory_avg_score` = 1.0 y `response_match_score` = 0.8. Ojo con exigir trayectoria exacta (1.0): es justo el "evaluar el camino" que conviene evitar; bájalo o usa los criterios basados en rúbrica (`rubric_based_tool_use_quality_v1`, `rubric_based_final_response_quality_v1`). ADK también reporta métricas de eficiencia (llamadas a tools, llamadas al modelo, tokens, duración) en cada eval.
+
+## Evaluar trayectorias y RAG
+
+Aunque el outcome es lo principal, hay dos familias de métricas intermedias muy útiles para **diagnosticar** por qué falla un agente:
+
+- **Trayectoria / uso de herramientas.** ¿Eligió la herramienta correcta? ¿Con argumentos válidos? ¿Cuántas llamadas hizo? RAGAS ofrece *Tool Call Accuracy* / *Tool Call F1*, *Agent Goal Accuracy* y *Topic Adherence*; ADK tiene `tool_trajectory_avg_score` y criterios de rúbrica de uso de tools. Úsalas como **señal de diagnóstico**, no como gate rígido.
+- **RAG.** Evalúa por separado la **recuperación** (recall@k, MRR, *Context Precision* y *Context Recall*) y la **generación** (*Faithfulness*: ¿la respuesta se apoya en el contexto?; *Response Relevancy*). Si mezclas ambas en un solo número, no sabrás si arreglar el índice o el prompt. Lo vemos en detalle en [RAG](/guia/rag).
+
+## Evals en CI/CD
+
+Una suite que no corre automáticamente se deja de mantener. El patrón habitual:
+
+| Momento | Qué corre | ¿Bloquea? |
+|---|---|---|
+| Cada PR | Suite de regresión rápida (graders de código, 1 trial) | Sí |
+| Merge a `main` / nightly | Regresión completa con k trials + juez LLM, suite de capacidad | Regresión sí; capacidad solo reporta |
+| Antes de cambiar de modelo | Todas las suites, comparando versión actual vs. candidata | Decisión explícita del equipo |
+| Producción (continuo) | Evals online sobre muestra de trazas | Alertas, no bloqueo |
+
+<Callout type="info" title="Compara contra la versión actual, no contra un umbral fijo">
+Un gate del tipo "regresión ≥ 98%" es frágil con muestras pequeñas: un solo caso mueve el porcentaje. Es más robusto comparar tarea por tarea contra la versión desplegada y bloquear si alguna que pasaba de forma consistente (pass^k) empieza a fallar.
+</Callout>
+
+## Evals online: producción como fuente de casos
+
+El dataset offline nunca cubre todo lo que hacen los usuarios. Las **evals online** puntúan una muestra de las trazas reales:
+
+- **Muestreo de trazas**: un porcentaje fijo (1–10%) más el 100% de sesiones con error, escalamiento a humano o feedback negativo.
+- **Graders automáticos** sobre esas trazas: relevancia, fidelidad, uso correcto de herramientas, seguridad.
+- **Feedback explícito** (pulgar arriba/abajo, "esto no me ayudó") e **implícito** (el usuario reformula la pregunta, abandona, pide hablar con una persona).
+- **Revisión humana** de lo marcado: los fallos confirmados se convierten en tareas nuevas del dataset. Así se cierra el ciclo.
+
+## Herramientas del ecosistema (octubre de 2026)
+
+| Herramienta | Tipo | Qué aporta |
+|---|---|---|
+| **ADK eval** | Integrada en el framework | `adk eval`, `.evalset.json`, criterios de trayectoria, respuesta, rúbricas, alucinación y seguridad; pytest con `AgentEvaluator` |
+| **AgentCore Evaluations** <Badge tone="ga">GA</Badge> | Gestionada (AWS), GA 31-03-2026 | Evaluadores built-in (`Builtin.Helpfulness`…) y custom con LLM-as-judge; modos **online** (trazas de producción), **on-demand** y **batch**; consume trazas OTel/OpenInference de Strands y LangGraph |
+| **Evaluación en Agent Platform** | Gestionada (Google Cloud) | Pilar *Optimize* de Gemini Enterprise Agent Platform; evaluación de respuestas y trayectorias de agentes |
+| **LangSmith** | SaaS / self-host (LangChain) | Datasets, experimentos, jueces LLM, anotación humana; funciona también sin LangChain |
+| **Langfuse** | OSS (MIT), self-host | Trazas, datasets, evaluadores y gestión de prompts; adquirida por **ClickHouse** (16-01-2026) |
+| **Arize Phoenix** | OSS | Trazas basadas en OpenInference/OTel, evals y experimentos; se autoaloja fácilmente |
+| **RAGAS** | Librería OSS | Métricas de RAG y de agentes (faithfulness, context recall, tool call accuracy…) |
+
+<Callout type="info">
+AgentCore Evaluations documenta integración con **Strands** y **LangGraph** vía instrumentación OpenTelemetry/OpenInference. Para un agente ADK desplegado en AgentCore Runtime, revisa la página de frameworks soportados antes de asumir compatibilidad completa de los evaluadores; AWS publica samples de evaluación sobre ADK en `awslabs/agentcore-samples`.
+</Callout>
+
+## Observabilidad: qué trazar
+
+Sin trazas no hay evals online, ni depuración, ni control de costo. El estándar que se impone son las **convenciones semánticas GenAI de OpenTelemetry**. A octubre de 2026 siguen en estado **Development** (pueden cambiar) y se mudaron a su propio repositorio, `open-telemetry/semantic-conventions-genai`, que cubre spans de cliente, agentes, eventos, métricas, MCP y convenciones por proveedor (Bedrock, OpenAI, Anthropic…).
+
+La estructura típica de una traza de agente:
+
+| Span | `gen_ai.operation.name` | Atributos clave |
+|---|---|---|
+| `invoke_agent soporte` | `invoke_agent` | `gen_ai.agent.name`, `gen_ai.agent.id`, `gen_ai.conversation.id` |
+| `chat global.anthropic.claude-sonnet-5-5` | `chat` | `gen_ai.provider.name` (`aws.bedrock`), `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens` |
+| `execute_tool get_order_status` | `execute_tool` | `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.type` |
+
+A eso agrega tus propios atributos de negocio: versión del agente, tenant, canal, equipo dueño (para *chargeback* de costos) y el resultado de guardrails.
+
+<Diagram id="evaluacion-trazas" />
+
+### Instrumentación con el SDK de OpenTelemetry
+
+Muchos frameworks ya emiten spans (ADK, Strands, LangGraph vía OpenInference), pero conviene entender qué hay debajo. Este ejemplo usa solo la API estándar de OpenTelemetry (`opentelemetry-sdk` y `opentelemetry-exporter-otlp-proto-http`) alrededor de un loop con la Converse API:
+
+```python title="telemetria.py"
+from opentelemetry import trace
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+
+provider = TracerProvider(resource=Resource.create(
+    {"service.name": "agente-soporte", "service.version": "2026.11.0"}))
+provider.add_span_processor(BatchSpanProcessor(
+    OTLPSpanExporter(endpoint="http://otel-collector:4318/v1/traces")))
+trace.set_tracer_provider(provider)
+tracer = trace.get_tracer("agente-soporte")
+MODEL_ID = "global.anthropic.claude-sonnet-5-5"
+
+def call_model(bedrock, messages, tool_config):
+    with tracer.start_as_current_span(f"chat {MODEL_ID}") as span:
+        span.set_attribute("gen_ai.operation.name", "chat")
+        span.set_attribute("gen_ai.provider.name", "aws.bedrock")
+        span.set_attribute("gen_ai.request.model", MODEL_ID)
+        resp = bedrock.converse(modelId=MODEL_ID, messages=messages, toolConfig=tool_config)
+        span.set_attribute("gen_ai.usage.input_tokens", resp["usage"]["inputTokens"])
+        span.set_attribute("gen_ai.usage.output_tokens", resp["usage"]["outputTokens"])
+        return resp
+
+def run_tool(name: str, call_id: str, args: dict, tools: dict):
+    with tracer.start_as_current_span(f"execute_tool {name}") as span:
+        span.set_attribute("gen_ai.operation.name", "execute_tool")
+        span.set_attribute("gen_ai.tool.name", name)
+        span.set_attribute("gen_ai.tool.call.id", call_id)
+        return tools[name](**args)   # las excepciones quedan registradas en el span
+```
+
+Como las convenciones están en *Development*, fija la versión de la librería de instrumentación y revisa el changelog al actualizar: los nombres de atributos ya cambiaron antes (por ejemplo, `gen_ai.system` pasó a `gen_ai.provider.name`).
+
+### Propagación a herramientas MCP
+
+Desde la especificación MCP `2026-07-28`, el contexto de traza W3C (`traceparent`, `tracestate`) viaja en el campo `_meta` de cada request. Si tu cliente MCP lo inyecta y el servidor lo extrae, el trabajo del servidor (la consulta al ERP, la llamada a la API interna) aparece **como hijo del span `execute_tool`** en la misma traza. Sin esto, cada servidor MCP es una caja negra y la latencia "desaparece" entre el agente y el sistema destino.
+
+### AgentCore Observability y CloudWatch
+
+Si despliegas en AgentCore, la telemetría se emite en formato compatible con OTEL y se guarda en **Amazon CloudWatch**: métricas de sesiones, latencia, duración, tokens y tasa de error, más un dashboard con visualización de trazas para agentes en Runtime. Gateway y Memory emiten sus propias métricas, y la actividad de API de Gateway y Registry queda en **CloudTrail** para auditoría. Puedes agregar spans propios desde el código del agente y, como el formato es OTel, reenviar los mismos datos a Langfuse, Phoenix o tu APM corporativo.
+
+## Dashboards, alertas y control de costos
+
+Un agente en producción necesita al menos estas señales:
+
+<Cards cols={2}>
+  <Card title="Calidad" tag="evals">Puntaje medio de evals online por suite, tasa de feedback negativo, tasa de escalamiento a humano.</Card>
+  <Card title="Fiabilidad" tag="SRE">Errores por herramienta, timeouts, reintentos, sesiones que alcanzan el límite de turnos (señal de bucles).</Card>
+  <Card title="Latencia" tag="UX">p50/p95 por turno y por sesión; desglose modelo vs. herramientas para saber dónde optimizar.</Card>
+  <Card title="Costo" tag="FinOps">Tokens y costo por sesión, por agente, por equipo y por tenant; tokens leídos de caché vs. no cacheados.</Card>
+</Cards>
+
+Para controlar el costo, recuerda que los agentes consumen del orden de **4× los tokens** de un chat y los sistemas multiagente unas **15×** (datos de Anthropic). Las palancas más efectivas: **prompt caching** de instrucciones y definiciones de tools, **routing** de subtareas simples a modelos más baratos, **límites de turnos y reintentos** en el harness, compactación del historial y **presupuestos por clave virtual** en el AI gateway (ver [Gateways](/guia/gateways)).
+
+<Callout type="danger" title="Las trazas contienen datos sensibles">
+Prompts y respuestas suelen incluir PII, datos de clientes y a veces secretos que una herramienta devolvió. Redacta en el Collector antes de exportar, define retención por tipo de dato, restringe quién puede ver el contenido completo de las trazas y no envíes trazas de producción a un SaaS sin revisar la residencia de datos. Más en [Seguridad y gobernanza](/guia/seguridad-gobernanza).
+</Callout>
+
+## Errores comunes
+
+<Callout type="warning" title="Antipatrones frecuentes">
+- **Evaluar solo el camino**: exigir la secuencia exacta de tools rompe con cada mejora legítima.
+- **Un solo trial**: con un intento por tarea confundes suerte con capacidad. Mide pass^k.
+- **Juez sin calibrar**: si nadie comparó al juez con humanos, no sabes qué mide.
+- **Dataset sintético puro**: los casos inventados por el equipo no se parecen a lo que piden los usuarios; empieza por fallos reales.
+- **No leer transcripts**: los números agregados esconden graders rotos y tareas ambiguas.
+- **Trazas sin atributos de negocio**: sin `agent.version` ni equipo dueño no puedes comparar versiones ni asignar costos.
+</Callout>
+
+<KeyPoints>
+
+- Adopta el vocabulario: **task, trial, transcript, outcome, grader, harness, suite**.
+- Grader de **código** para el outcome; **LLM juez calibrado** para lo subjetivo; **humanos** para calibrar.
+- Separa evals de **capacidad** (empiezan bajas) y de **regresión** (≈100%, bloquean el despliegue).
+- Reporta **pass@k y pass^k**: 75% por intento es solo ~42% de pasar 3 de 3.
+- Empieza con **20–50 tareas de fallos reales** y evalúa el resultado, no el camino.
+- Instrumenta con **OpenTelemetry GenAI** (aún *Development*), propaga `traceparent` a MCP y alimenta evals online con muestras de producción.
+
+</KeyPoints>
+
+## Siguientes pasos
+
+<Cards cols={3}>
+  <Card title="Seguridad y gobernanza" href="/guia/seguridad-gobernanza">Guardrails, identidad, políticas y auditoría: lo que las trazas deben poder demostrar.</Card>
+  <Card title="Orquestación avanzada" href="/guia/orquestacion-avanzada">Ejecución durable, HITL y multiagente: más pasos que evaluar y trazar.</Card>
+  <Card title="AWS Bedrock y AgentCore" href="/guia/aws-bedrock-agentcore">Runtime, Observability y Evaluations gestionados en AWS.</Card>
+</Cards>

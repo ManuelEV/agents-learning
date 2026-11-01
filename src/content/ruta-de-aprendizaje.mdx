@@ -1,0 +1,62 @@
+Esta ruta va **de los fundamentos a la orquestación multiagente en producción** en siete niveles. Está pensada para alguien con experiencia de desarrollo que quiere construir agentes en un entorno empresarial, y ordena los temas según dependen unos de otros: no tiene sentido diseñar un sistema multiagente sin saber evaluar un agente único, ni evaluar sin entender el loop.
+
+<Callout type="tip" title="Cómo usarla">
+Cada nivel tiene **temas**, un **proyecto hito** y **criterios de salida** concretos. No avances hasta cumplir los criterios: son los que separan "lo vi en un tutorial" de "lo puedo operar en producción". Las semanas son orientativas para dedicación parcial (5–8 h/semana).
+</Callout>
+
+## Los siete niveles
+
+Selecciona un nivel para ver su detalle, los artículos de esta guía que lo cubren y recursos externos:
+
+<Roadmap />
+
+## Un solo proyecto que crece contigo
+
+En lugar de siete proyectos sueltos, los hitos se encadenan en un **asistente de operaciones para retail** que va ganando piezas. Así practicas también lo más difícil del mundo real: evolucionar un sistema sin romperlo.
+
+<Diagram id="ruta-proyecto-integrador" />
+
+## Atajos según tu punto de partida
+
+| Si ya… | Puedes saltar a | Pero revisa |
+|---|---|---|
+| Usas LLMs con salida estructurada en producción | Nivel 1 | Costos y prompt caching (nivel 0) |
+| Construiste agentes con un framework (p. ej. ADK) | Nivel 2 o 4 | Que tu loop tenga límites y validación de herramientas |
+| Tienes un agente ADK + gateway + Bedrock funcionando | Nivel 4 | MCP 2026-07-28, evals en CI y seguridad (nivel 5) |
+| Operas sistemas distribuidos y observabilidad | Nivel 5 acelerado | Evals de trayectoria, que no existen en el software clásico |
+
+## Cómo estudiar cada nivel
+
+<Steps>
+
+1. **Lee** el artículo de la guía y recorre sus diagramas paso a paso: busca entender el *flujo*, no memorizar APIs.
+2. **Reproduce** el ejemplo de código mínimo contra un modelo real (Bedrock, Gemini o el que uses).
+3. **Construye** el proyecto hito con un set de pruebas desde el primer día (aunque sean 10 casos).
+4. **Mide** antes de optimizar: costo por tarea, latencia, tasa de éxito.
+5. **Escribe** una nota corta de decisiones (ADR) con lo que aprendiste: será tu material para el nivel siguiente.
+
+</Steps>
+
+## Recursos gratuitos recomendados
+
+<Cards cols={2}>
+  <Card title="Agentic AI — DeepLearning.AI" href="https://www.deeplearning.ai/courses/agentic-ai">Patrones de diseño, herramientas, MCP y evaluación con Andrew Ng. Ideal para niveles 1–3.</Card>
+  <Card title="Hugging Face Agents Course" href="https://huggingface.co/learn/agents-course/unit0/introduction">Fundamentos y práctica con smolagents, LangGraph y LlamaIndex, con certificados.</Card>
+  <Card title="Anthropic Academy" href="https://anthropic.skilljar.com/">API de Claude, introducción y temas avanzados de MCP, Agent Skills y subagentes.</Card>
+  <Card title="5-Day AI Agents Intensive (Google/Kaggle)" href="https://blog.google/innovation-and-ai/technology/developers-tools/ai-agents-intensive-recap/">Whitepapers "Introduction to Agents" y "Agent Quality"; formato autodirigido.</Card>
+  <Card title="A2A y MCP — DeepLearning.AI" href="https://learn.deeplearning.ai/courses/a2a-the-agent2agent-protocol">Cursos cortos de los dos protocolos clave del nivel 4.</Card>
+  <Card title="AI Agents for Beginners — Microsoft" href="https://microsoft.github.io/ai-agents-for-beginners">Lecciones open source, útiles como repaso y para el ecosistema Azure.</Card>
+</Cards>
+
+<Callout type="info" title="Sobre AWS">
+Para el camino AWS, el curso corto gratuito más directo es *Serverless Agentic Workflows with Amazon Bedrock* (DeepLearning.AI). AWS ofrece además un curso pagado con instructor sobre AgentCore; los **samples oficiales** de [agentcore-samples](https://github.com/awslabs/agentcore-samples) son el mejor material práctico, incluido uno específico para Google ADK.
+</Callout>
+
+<KeyPoints>
+
+- Orden: **fundamentos → tools → RAG → workflows/framework → protocolos → producción → multiagente**.
+- Cada nivel termina con un proyecto **medido**: sin métricas no hay criterio de salida.
+- El proyecto integrador te obliga a evolucionar un sistema real, que es el verdadero trabajo en empresa.
+- Multiagente es el último nivel por una razón: multiplica costo (≈15× tokens vs. chat) y complejidad.
+
+</KeyPoints>

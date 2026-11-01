@@ -1,0 +1,131 @@
+No existe "el mejor framework de agentes". Existe el que encaja con **tu nube, tu lenguaje, el nivel de control que necesita tu proceso y la experiencia de tu equipo**. Esta página reúne lo visto en [Google ADK](/guia/google-adk), [Strands](/guia/strands-agents), [LangGraph](/guia/langgraph) y [otros frameworks](/guia/otros-frameworks) en una comparación lado a lado, una guía de decisión por contexto y un método para validar la elección en dos semanas.
+
+Antes de comparar, una advertencia que ahorra meses: **el framework es la decisión más reversible de tu arquitectura**. Las herramientas expuestas por MCP, los agentes remotos por A2A, las trazas en OpenTelemetry y los datos de evaluación sobreviven a un cambio de framework. Invierte primero en eso.
+
+## Tabla comparativa (octubre de 2026)
+
+| Framework | Lenguajes | Modelo multiagente | Estado y durabilidad | MCP | A2A | Lock-in | Madurez | Mejor para |
+|---|---|---|---|---|---|---|---|---|
+| **Google ADK** | Py, TS, Go, Java, Kotlin | `sub_agents`, `AgentTool`, grafos `Workflow` 2.0 | Sessions, State, Memory, Artifacts; HITL en grafos | Sí (`McpToolset`) | Sí (exp. en Py) | Bajo-medio | Alta (Py 2.13) | GCP, multilenguaje, ADK + Bedrock vía LiteLLM |
+| **AWS Strands** | Py, TS | Agents as Tools, Swarm, Graph, Workflow | Session managers, AgentCore Memory | Sí (`MCPClient`) | Sí | Bajo-medio | Alta (Py 1.63) | AWS/Bedrock, producir rápido |
+| **LangGraph** | Py, JS | Grafos, subgrafos, supervisor, handoffs | Checkpointers, interrupts, durable execution | Sí | No verificado | Bajo | Muy alta (1.2) | Control explícito, HITL, durabilidad |
+| **OpenAI Agents SDK** | Py, JS | Handoffs, agents as tools | Sessions; durable con Temporal | Sí | No verificado | Medio | Media (0.24) | Modelos OpenAI, primitivas simples |
+| **Claude Agent SDK** | Py, TS | Subagentes | Sessions con resume/fork | Sí | No verificado | Alto (Claude) | Media-alta | Agentes sobre archivos y código |
+| **MS Agent Framework** | .NET, Py, Go (preview) | Workflows, handoff, group chat, Magentic | Checkpointing, HITL | Sí | Sí | Medio | Alta (1.0 GA) | .NET, Azure, M365 |
+| **CrewAI** | Py | Crews (secuencial/jerárquico), Flows | Estado de Flow | Sí | No verificado | Bajo | Alta | Prototipos multiagente por roles |
+| **LlamaIndex** | Py, TS | `AgentWorkflow` | Contexto del workflow | Sí | No verificado | Bajo | Alta | RAG y documentos |
+| **Pydantic AI v2** | Py | Delegación, Pydantic Graph | Durable (Temporal, DBOS, Prefect, Restate) | Sí | No verificado | Bajo | Alta (v2) | Salidas tipadas, DI, testabilidad |
+| **Mastra** | TS | Agentes + workflows | Memoria y storage | No verificado | No verificado | Bajo | Media-alta | Equipos full-stack JS |
+| **Vercel AI SDK** | TS | `ToolLoopAgent` | A cargo de la app | Sí | No verificado | Bajo | Alta (v7) | Agentes en apps web |
+| **Cloudflare Agents** | TS | Agentes como Durable Objects | Nativo (DO + SQLite) | Sí | No verificado | Alto | Media (0.x) | Estado por entidad, tiempo real, edge |
+
+"No verificado" significa que no confirmamos soporte nativo en la documentación oficial durante esta revisión; en casi todos los casos puedes integrar A2A con el SDK oficial del protocolo, aunque sea con más código.
+
+### Cómo leer las columnas
+
+- **Modelo multiagente**: lo que importa es **quién decide el siguiente paso**. En un grafo decide tu código; en handoffs, transferencias o Swarm decide el LLM. Los frameworks maduros ofrecen ambos.
+- **Estado y durabilidad**: ¿puede el agente pausarse tres días esperando una aprobación y reanudar en otro servidor? LangGraph, Microsoft Agent Framework, los grafos de ADK 2.0 y Pydantic AI con Temporal están diseñados para eso; en otros lo construyes tú.
+- **Lock-in**: no se trata solo de licencia (todos son open source salvo matices), sino de **cuánto te ata a un proveedor de modelos o de nube**. Claude Agent SDK solo funciona con Claude; Cloudflare Agents solo en Cloudflare.
+- **Madurez**: versión, ritmo de cambios *breaking* y comunidad. Los 0.x (OpenAI Agents SDK, Cloudflare Agents) cambian más.
+
+## Guía de decisión por contexto
+
+<Cards cols={2}>
+  <Card title="Empresa AWS (Bedrock + AgentCore)" tag="AWS">
+    **Strands** es el camino nativo y con menos código. Si el equipo ya domina ADK (como el lector de referencia), **ADK + LiteLLM → Bedrock** desplegado en **AgentCore Runtime** es igual de válido. LangGraph si el proceso exige grafos con checkpoints.
+  </Card>
+  <Card title="Empresa Google Cloud" tag="GCP">
+    **Google ADK** con Agent Runtime, Sessions y Memory Bank, Agent Gateway y Agent Registry. Para flujos estrictos, los grafos `Workflow` de ADK 2.0 evitan sumar LangGraph.
+  </Card>
+  <Card title="Azure, .NET y Microsoft 365" tag="Microsoft">
+    **Microsoft Agent Framework** (1.0 GA) con Foundry Agent Service: hosted agents, Toolboxes MCP, identidad Entra y publicación en Teams/Copilot.
+  </Card>
+  <Card title="TypeScript y edge" tag="JS/TS">
+    **Mastra** si quieres un framework completo; **Vercel AI SDK** si el agente vive en una app Next.js; **Cloudflare Agents** si necesitas estado por usuario y tiempo real en el edge.
+  </Card>
+  <Card title="Datos y RAG como núcleo" tag="RAG">
+    **LlamaIndex** por su ecosistema de ingesta, índices y query engines. Combínalo con otro orquestador si el flujo crece. Ver [RAG](/guia/rag).
+  </Card>
+  <Card title="HITL fuerte y durabilidad" tag="control">
+    **LangGraph** (interrupts + checkpointers), **Microsoft Agent Framework** workflows, **ADK 2.0** grafos, o **Pydantic AI / OpenAI Agents SDK + Temporal** para workflows de días.
+  </Card>
+</Cards>
+
+## Diagrama de decisión
+
+El siguiente flujo te lleva a una **lista corta** de uno o dos candidatos. No reemplaza la prueba de concepto; la orienta.
+
+<Diagram id="comparativa-flujo" height={560} />
+
+Algunos matices que el diagrama simplifica:
+
+- **Multinube o sin nube dominante**: ADK, LangGraph y Strands son portables. Elige por lenguaje y estilo (grafos vs. model-driven), y pon un **AI gateway** (LiteLLM, Agent Router) entre el agente y los modelos. Ver [gateways](/guia/gateways).
+- **Agentes sobre código o archivos**: si el agente revisa repositorios, edita documentos o automatiza tareas de ingeniería, el **Claude Agent SDK** suele ganar aunque estés en cualquier nube: corre con Claude en Bedrock, Google Cloud o Foundry.
+- **Prototipo de una semana para negocio**: CrewAI u OpenAI Agents SDK producen demos rápidas; antes de producción, re-evalúa con esta misma tabla.
+
+## Framework y runtime son decisiones distintas
+
+En 2026 los grandes runtimes gestionados son **agnósticos de framework**: AgentCore Runtime (AWS) acepta Strands, ADK, LangGraph, CrewAI, LlamaIndex u OpenAI Agents SDK; Agent Runtime (Google, ex Agent Engine) acepta ADK, LangGraph, LlamaIndex, CrewAI o un contenedor; los hosted agents de Microsoft Foundry aceptan Agent Framework, LangGraph, OpenAI Agents SDK, Claude Agent SDK o código propio.
+
+<Diagram id="comparativa-runtimes" />
+
+Esto cambia la conversación: no necesitas Strands para usar AgentCore ni ADK para usar Google Cloud. Decide el **framework** por equipo y tipo de flujo, y el **runtime** por dónde están tus datos, tu identidad corporativa y tus modelos. Los detalles de cada plataforma están en [AWS Bedrock y AgentCore](/guia/aws-bedrock-agentcore), [Google Agent Platform](/guia/google-agent-platform) y [Microsoft Foundry y Cloudflare](/guia/microsoft-foundry-cloudflare).
+
+<Callout type="info" title="Un ejemplo real: el lector de referencia">
+Un equipo que eligió **Google ADK** por su modelo de agentes y evaluación integrada, pero cuya empresa estandarizó en **AWS**, no tiene que elegir: usa Claude en Bedrock vía LiteLLM (idealmente a través de un proxy LiteLLM como AI gateway) y despliega en **AgentCore Runtime** con el sample oficial. La [arquitectura ADK + gateway + Bedrock](/guia/arquitectura-adk-gateway-bedrock) muestra el diseño completo.
+</Callout>
+
+## Cómo evaluar un framework en 2 semanas
+
+Leer documentación no alcanza: los problemas aparecen al integrar herramientas reales, al pausar un flujo o al depurar una trayectoria rara. Este plan compara dos candidatos con el **mismo caso de uso** y los **mismos evals**.
+
+<Steps>
+
+1. **Días 1-2 · Caso y evals.** Elige un caso real y acotado (p. ej. "resolver consultas de estado de pedido con posible reembolso"). Escribe **20-30 tareas de evaluación** a partir de tickets reales, con resultado esperado. Define métricas: tasa de éxito, costo por tarea, latencia p95, número de turnos.
+2. **Días 3-5 · Agente mínimo en cada framework.** Mismo modelo (p. ej. `global.anthropic.claude-sonnet-5-5` en Bedrock), mismas 3-4 herramientas **expuestas por MCP** para que la integración sea idéntica. Mide cuánto código y cuántas horas tomó.
+3. **Días 6-7 · Lo difícil.** Agrega una acción que requiera **aprobación humana** y reanudación tras reiniciar el proceso. Agrega un segundo agente (especialista o remoto por A2A). Aquí se separan los frameworks.
+4. **Días 8-9 · Producción simulada.** Despliega en tu runtime objetivo (AgentCore, Agent Runtime, Foundry o contenedor). Conecta trazas OpenTelemetry a tu backend (Langfuse, CloudWatch, LangSmith). Prueba sesiones concurrentes y un fallo de herramienta.
+5. **Día 10 · Evals y decisión.** Corre los evals varias veces por tarea (los agentes son no deterministas: mira **pass^k**, no solo un intento). Compara resultados, costo y la experiencia de depuración. Documenta la decisión como ADR.
+
+</Steps>
+
+### Checklist de evaluación
+
+| Criterio | Pregunta concreta | Señal de alerta |
+|---|---|---|
+| Herramientas | ¿Cuánto código para exponer una API interna y un servidor MCP? | Wrappers manuales para cada tool |
+| Control | ¿Puedo forzar un paso obligatorio o una ruta determinista? | Solo "pedirle al prompt" que lo haga |
+| HITL | ¿Puedo pausar, persistir y reanudar en otro proceso? | La aprobación vive en memoria |
+| Estado | ¿Dónde se guarda la sesión y cómo la escalo horizontalmente? | Solo opción en memoria documentada |
+| Multiagente | ¿Soporta orquestador y handoffs? ¿A2A? | Un único patrón rígido |
+| Modelos | ¿Funciona con Bedrock/Gemini/OpenAI y con un AI gateway? | Acoplado a un proveedor sin alternativa |
+| Observabilidad | ¿Emite trazas OTel con tokens, tools y latencia por paso? | Solo logs de texto |
+| Evaluación | ¿Hay soporte de evals o es fácil integrarlo en CI? | Imposible reproducir una ejecución |
+| Seguridad | ¿Hooks/callbacks para políticas, filtrado de tools, secretos fuera del código? | Credenciales en el prompt o en el agente |
+| Operación | ¿Ritmo de breaking changes? ¿Changelog claro? ¿Soporte del runtime objetivo? | Versiones 0.x sin guía de migración |
+
+<Callout type="warning" title="Errores típicos al elegir">
+- **Elegir por estrellas en GitHub** o por la demo más vistosa, no por el caso de uso.
+- **Comparar con modelos distintos**: el modelo explica más varianza que el framework. Fija el modelo.
+- **No probar HITL ni durabilidad** hasta producción, cuando ya es caro cambiar.
+- **Acoplar las herramientas al framework** en vez de exponerlas por MCP: duplica el costo de migrar.
+- **Mezclar dos frameworks de orquestación** sin necesidad (p. ej. CrewAI dentro de LangGraph dentro de ADK). Un orquestador por sistema; los demás, detrás de A2A.
+</Callout>
+
+<KeyPoints>
+
+- No hay framework universal: decide por **nube, lenguaje, control del flujo y equipo**.
+- Control explícito y HITL fuerte → **LangGraph**, grafos de **ADK 2.0** o **Microsoft Agent Framework**. Model-driven en AWS → **Strands**. GCP → **ADK**. .NET → **Agent Framework**. TS → **Mastra / Vercel / Cloudflare**.
+- **Framework y runtime son decisiones separadas**: AgentCore, Agent Runtime y Foundry hosted agents son agnósticos.
+- MCP, A2A y OpenTelemetry hacen reversible la elección del framework.
+- Valida con una **PoC de 2 semanas**, mismo modelo, mismas herramientas MCP y los mismos 20-30 evals.
+
+</KeyPoints>
+
+## Siguientes pasos
+
+<Cards cols={3}>
+  <Card title="Arquitectura ADK + gateway + Bedrock" href="/guia/arquitectura-adk-gateway-bedrock">La combinación del lector de referencia, de extremo a extremo.</Card>
+  <Card title="Evaluación y observabilidad" href="/guia/evaluacion-observabilidad">Cómo construir los evals de la PoC y trazar cada paso.</Card>
+  <Card title="Multiagente con A2A" href="/guia/arquitectura-multiagente-a2a">Agentes de distintos frameworks colaborando por protocolo.</Card>
+</Cards>
