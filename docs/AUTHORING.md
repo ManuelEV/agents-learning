@@ -13,7 +13,7 @@ Cada artículo son dos archivos con el mismo slug:
 | `src/content/<slug>.mdx` | Cuerpo del artículo. **Sin** título H1 ni lista de referencias: el layout los genera desde `meta`. |
 | `src/diagrams/<slug>.ts` | Specs de diagramas de la página (se registran solos por glob). Usa ids con prefijo del slug, p. ej. `mcp-arquitectura`. |
 
-Secciones (`section`): `inicio`, `fundamentos`, `conectar`, `frameworks`, `plataformas`, `arquitecturas`, `produccion`.
+Secciones (`section`): `inicio`, `fundamentos`, `conectar`, `frameworks`, `plataformas`, `arquitecturas`, `casos`, `produccion`.
 
 ### `references`
 Entre 6 y 15 por artículo, priorizando fuentes primarias (docs oficiales, especificaciones, blogs de ingeniería del proveedor). Formato:
@@ -88,4 +88,5 @@ No ejecutes `vite build` ni `vite dev` (los corre el integrador). No edites arch
 | frameworks | `google-adk`, `strands-agents`, `langgraph`, `otros-frameworks`, `comparativa-frameworks` |
 | plataformas | `aws-bedrock-agentcore`, `google-agent-platform`, `microsoft-foundry-cloudflare` |
 | arquitecturas | `arquitectura-adk-gateway-bedrock`, `arquitectura-soporte-rag-mcp`, `arquitectura-multiagente-a2a` |
+| casos | `casos-reales`, `caso-atencion-cliente`, `caso-migraciones-codigo`, `caso-investigacion-multiagente`, `caso-datos-analitica`, `caso-servicios-financieros`, `caso-plataformas-internas` |
 | produccion | `evaluacion-observabilidad`, `seguridad-gobernanza`, `orquestacion-avanzada` |

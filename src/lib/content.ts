@@ -1,6 +1,6 @@
 import type { ComponentType } from 'react'
 
-export type SectionId = 'inicio' | 'fundamentos' | 'conectar' | 'frameworks' | 'plataformas' | 'arquitecturas' | 'produccion'
+export type SectionId = 'inicio' | 'fundamentos' | 'conectar' | 'frameworks' | 'plataformas' | 'arquitecturas' | 'casos' | 'produccion'
 
 export interface Reference {
   title: string
@@ -31,6 +31,7 @@ export const SECTIONS: { id: SectionId; title: string; blurb: string }[] = [
   { id: 'frameworks', title: 'Frameworks', blurb: 'ADK, Strands, LangGraph y el resto del ecosistema, comparados.' },
   { id: 'plataformas', title: 'Plataformas cloud', blurb: 'AWS Bedrock/AgentCore, Google Agent Platform, Microsoft Foundry, Cloudflare.' },
   { id: 'arquitecturas', title: 'Arquitecturas de referencia', blurb: 'Ejemplos completos de extremo a extremo con diagramas paso a paso.' },
+  { id: 'casos', title: 'Casos reales', blurb: 'Empresas que ya operan agentes a gran escala: qué construyeron, cómo y qué aprendieron.' },
   { id: 'produccion', title: 'Producción', blurb: 'Evaluación, observabilidad, seguridad y orquestación avanzada.' },
 ]
 

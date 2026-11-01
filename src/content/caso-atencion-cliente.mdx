@@ -1,0 +1,255 @@
+La atención al cliente es donde más agentes de IA hay en producción y donde más se ve lo que pasa cuando fallan: hablan con clientes externos, citan políticas que tienen consecuencias y a veces mueven dinero. Esta página revisa cuatro despliegues que superan el millón de conversaciones y que tienen **detalle técnico público**: **Klarna**, **Intercom Fin**, **DoorDash** y **Salesforce Help**. Al final hay dos casos breves (Lyft sobre Bedrock y Deutsche Telekom), una tabla comparativa y los patrones que se repiten.
+
+Por cada caso verás el contexto, la escala, lo que se sabe de la arquitectura, las decisiones técnicas, los resultados, los retrocesos y qué puedes llevarte a tu proyecto. Fechas y estados a **noviembre de 2026**.
+
+<Callout type="warning" title="Cómo leer las cifras de esta página">
+Casi todas las cifras son **auto-reportadas** por la empresa o por su proveedor (OpenAI, AWS, LangChain), y no encontré auditorías independientes de ninguna. Cada una indica quién la reporta y cuándo. Además, **"resolución" se define distinto en cada empresa**: en una cuenta como resuelto lo que no se escaló, en otra lo que el cliente confirmó con un "sí". No compares porcentajes de resolución entre empresas como si midieran lo mismo.
+</Callout>
+
+## Klarna: de "700 agentes" al modelo híbrido
+
+### Contexto y escala
+
+Klarna (pagos y compra en cuotas) lanzó a comienzos de 2024 un asistente de atención basado en modelos de OpenAI. El 27 de febrero de 2024, **según la empresa**, el asistente había tenido **2,3 millones de conversaciones en su primer mes**, dos tercios de todos los chats de atención, con este balance:
+
+| Métrica (feb. 2024, según Klarna) | Valor |
+|---|---|
+| Trabajo equivalente | 700 agentes a tiempo completo |
+| Tiempo de resolución | menos de 2 minutos (antes, 11) |
+| Consultas repetidas | −25 % |
+| Cobertura | 23 mercados, 24/7, más de 35 idiomas |
+| Impacto proyectado | USD 40 millones de mejora en beneficio en 2024 (estimación) |
+
+Fue el caso que más se citó en 2024 para decir que "los agentes reemplazan centros de contacto".
+
+### Arquitectura: lo que está publicado
+
+Klarna publicó poco sobre su arquitectura. El caso de cliente de LangChain (febrero de 2025) dice que el asistente se construyó sobre **LangGraph** como "arquitectura de agente controlable", que **evolucionó a un sistema multiagente**, que usa **prompts específicos para cada escenario** (para bajar tokens y latencia) y que el equipo trabajó con **desarrollo guiado por pruebas** sobre **LangSmith**, con trazas paso a paso y evaluaciones con LLM. No hay detalle público de herramientas, RAG, guardrails ni de cómo se deriva a humanos, así que no hay diagrama de este caso: cualquier dibujo sería inventado.
+
+### El giro de 2025 y 2026
+
+La historia completa tiene más matices que el titular de 2024:
+
+- **Mayo de 2025.** En una entrevista con Bloomberg (8 de mayo, citada por CX Dive), el CEO Sebastian Siemiatkowski reconoció que *"el costo fue un factor de evaluación demasiado predominante"* y que *"lo que terminas teniendo es menor calidad"*. Anunció más inversión en atención humana y la promesa de que *"siempre habrá un humano si lo quieres"*. Según CX Dive, el asistente seguía atendiendo dos tercios de las consultas.
+- **Noviembre de 2025.** En la llamada de resultados del tercer trimestre (18 de noviembre), Siemiatkowski dijo que el asistente pasó de hacer el trabajo de "unos 700 empleos de tiempo completo" a **"unos 853, con un ahorro de USD 60 millones"**. La plantilla total había bajado cerca de 47 % por rotación natural, sin contrataciones.
+- **Febrero de 2026.** En el podcast 20VC (citado por CX Dive) describió un modelo de atención humana **"tipo Uber"**: agentes remotos reclutados entre sus propios clientes, con la atención humana como "experiencia VIP". Su frase: *"Si la IA puede hacer atención al cliente, significa que va a ser la atención barata"*.
+
+La lectura honesta es que Klarna **no abandonó el agente**: le pasó más volumen. Lo que cambió fue el criterio. El agente quedó para lo frecuente y simple, y el humano volvió a estar disponible para quien lo pida, como diferenciador. Las cifras de "empleos equivalentes" son estimaciones de la empresa sin metodología publicada, y no encontré métricas de satisfacción del asistente en las fuentes revisadas.
+
+### Qué puedes aplicar
+
+- **No optimices solo el costo por contacto.** Si tu métrica principal es la deflexión, el sistema aprenderá a retener clientes que necesitan una persona. Pon satisfacción, recontacto y escalamiento correcto en el mismo tablero ([evaluación y observabilidad](/guia/evaluacion-observabilidad)).
+- **Haz visible la salida hacia un humano.** Que el cliente sepa que puede pedir una persona protege la confianza aunque el agente resuelva la mayoría de los casos.
+- **Prompts por escenario** en vez de un prompt gigante: es la misma idea de dividir el problema que verás en [patrones de diseño](/guia/patrones-de-diseno).
+
+## Intercom Fin: modelos especializados y precio por resolución
+
+### Contexto y escala
+
+Fin es el agente de soporte que Intercom vende a otras empresas desde marzo de 2023. Su escala no viene de un solo cliente sino de miles. **Según Intercom**: más de 12.000 clientes, más de 2 millones de resoluciones por semana, una tasa de resolución promedio de **76 %** (página del producto, sin fecha) y un precio de **USD 0,99 por resolución**. El caso de AWS (Intercom con Claude en Amazon Bedrock) cita un dato más conservador: **56 % de resolución promedio a los 30 días** del despliegue, con algunos clientes en 80–90 %.
+
+Las dos cifras miden cosas distintas (madurez del despliegue, período y mezcla de clientes), y ambas usan la definición de resolución de Intercom.
+
+### Arquitectura
+
+Intercom documentó su pipeline con más detalle que casi cualquier otro proveedor:
+
+<Diagram id="cac-fin-pipeline" height={540} />
+
+El diagrama es una reconstrucción simplificada de la página *Fin AI Engine* y del post de investigación sobre el reranker. Los datos que sostienen cada etapa son estos:
+
+- **Recuperación y reranking propios.** El post del 11 de septiembre de 2025 describe el flujo: Fin condensa la conversación en una consulta corta, la embebe, recupera los **40 mejores** pasajes y los reordena con **fin-cx-reranker**, un modelo basado en **ModernBERT-large**. Lo entrenaron con 400.000 consultas reales de 40 candidatos cada una (16 millones de pares) y etiquetas generadas por un reranker LLM que hizo de "maestro".
+- **Resultados del reranker, según Intercom.** Frente a Cohere Rerank 3.5, el MAP offline subió de 0,521 a 0,612 (+17,5 %). En un A/B con 1,5 millones de conversaciones, la latencia P50 se mantuvo en unos 150 ms y la resolución mejoró de forma estadísticamente significativa (p < 0,01), aunque no publicaron el tamaño del efecto. El costo de reranking bajó **80 %**.
+- **Un modelo generador propio.** En marzo de 2026 Intercom lanzó **Fin Apex 1.0**, un modelo post-entrenado con datos de producción de Fin. En su benchmark, reportado por VentureBeat el 26 de marzo de 2026, Apex resolvió **73,1 %** frente a 71,1 % de GPT-5.4 y Claude Opus 4.5 y 69,6 % de Claude Sonnet 4.6, con 65 % menos alucinaciones que Sonnet 4.6 y respuestas de 3,7 s. Intercom **no reveló el modelo base**; solo dijo que tiene "cientos de miles de millones de parámetros". La página actual del producto ya menciona Apex 2.0.
+- **Muchos LLM, no uno.** El caso de AWS describe **15 a 20 subcomponentes**, cada uno con un LLM elegido para su tarea: verificar respuestas, comprobar el cumplimiento de políticas o generar.
+
+### Decisiones técnicas clave
+
+1. **Invertir en retrieval antes que en el modelo.** El primer modelo propio que publicaron fue un reranker, no un LLM. La recuperación determina qué puede responder el generador.
+2. **Validar antes de enviar** como etapa explícita del pipeline, no como un "ojalá" en el prompt.
+3. **Precio por resultado.** Cobrar USD 0,99 solo cuando Fin resuelve alinea el incentivo del proveedor con el del cliente, pero también hace que **la definición de "resolución" sea un asunto comercial**. Pregunta siempre cómo se mide.
+
+### Límites y críticas
+
+- Todas las métricas de resolución las define y mide Intercom. Las cifras publicadas (56 %, 73,1 %, 76 %) vienen de contextos distintos y no son comparables entre sí.
+- El benchmark de Apex es de Intercom, y no revelar el modelo base generó críticas en la prensa especializada.
+- Fin solo resuelve lo que está en tu contenido o en tus *Workflows*. Si la base de conocimiento es mala, la resolución también lo será.
+
+### Qué puedes aplicar
+
+- Antes de cambiar de LLM, mide tu **retrieval** con recall@k y NDCG sobre consultas reales. Un reranker (gestionado, como Cohere Rerank 3.5 en Bedrock, o propio) suele ser la mejora más barata ([RAG](/guia/rag)).
+- Si compras un agente "llave en mano", exige la definición exacta de resolución y acceso a las conversaciones no resueltas.
+- La destilación con un LLM "maestro" que etiqueta datos para entrenar un modelo chico y rápido es un patrón reutilizable para rerankers, clasificadores de intención y guardrails.
+
+## DoorDash: guardrails en cascada, jueces calibrados y simulación
+
+### Contexto
+
+DoorDash publicó tres piezas que, juntas, muestran cómo madura un agente de soporte con el tiempo:
+
+1. Septiembre de 2024: un chatbot con RAG para **Dashers** (repartidores), con guardrails y un LLM Judge.
+2. 2024: autoservicio **por voz** construido con AWS sobre Amazon Bedrock.
+3. Enero de 2026: un sistema de **simulación y evaluación** para el chatbot de soporte, que según la cobertura de ByteByteGo atiende "cientos de miles de contactos diarios" de clientes, comercios y Dashers.
+
+El problema de partida era común: el soporte anterior se basaba en **flujos predefinidos**, y solo un subconjunto pequeño de problemas se resolvía rápido.
+
+### Arquitectura: chat con guardrail en dos niveles (2024)
+
+<Diagram ids={["cac-doordash-guardrail", "cac-doordash-flywheel"]} height={540} />
+
+La primera pestaña es una reconstrucción simplificada del post de septiembre de 2024. La pieza más interesante es el **LLM Guardrail en cascada**:
+
+- **Nivel 1, barato:** un método propio de similitud semántica compara la respuesta contra segmentos del artículo recuperado con una ventana deslizante. Si se parecen lo suficiente, la respuesta pasa.
+- **Nivel 2, caro:** solo cuando el nivel 1 marca la respuesta, un evaluador LLM recibe la respuesta, los artículos y el historial y decide si está fundamentada.
+- **Si falla,** se reintenta o se deriva a un agente humano. DoorDash dice que descartó un guardrail más sofisticado por **latencia, tokens y costo**.
+
+**Según DoorDash**, el guardrail redujo **90 % las alucinaciones** y **99 % los problemas de cumplimiento graves**, aunque no publicó la línea base ni la metodología. Fuera de línea, un **LLM Judge** puntúa las conversaciones en cinco dimensiones (corrección del retrieval, exactitud, gramática, coherencia y relevancia), con revisión humana de muestras y pruebas de regresión con **Promptfoo** en cada cambio de prompt. El equipo también encontró que muchas fallas venían de **vacíos en la base de conocimiento** y no del modelo.
+
+### Voz sobre Amazon Bedrock
+
+Para el canal telefónico, el caso de estudio de AWS describe una solución sobre **Amazon Connect + Amazon Lex** (el IVR que ya tenían) con **Amazon Bedrock**, **Claude 3 Haiku** y **Knowledge Bases for Amazon Bedrock** para hacer RAG sobre el centro de ayuda público. Datos clave, **según AWS y DoorDash**:
+
+- Objetivo de latencia de **2,5 segundos o menos** por respuesta de voz, lo que explica la elección de un modelo chico y rápido.
+- **8 semanas** de iteración con el AWS Generative AI Innovation Center hasta tener una arquitectura lista para pruebas A/B.
+- Un marco de evaluación automática en SageMaker con "miles de pruebas por hora", que compara semánticamente las respuestas contra un ground truth.
+- Atiende "cientos de miles" de llamadas al día y reduce los escalamientos a agentes en "miles por día".
+
+<Callout type="info" title="Cuidado con las cifras mezcladas">
+El mismo caso de AWS menciona −49 % de transferencias, +12 % de resolución en el primer contacto y USD 3 millones de ahorro, pero esas cifras corresponden al **IVR anterior con Lex**, no a la solución generativa. Muchos resúmenes de terceros las atribuyen mal.
+</Callout>
+
+### Simulación y evaluación antes de producción (2026)
+
+La segunda pestaña del diagrama reconstruye el sistema publicado en enero de 2026. En vez de probar el chatbot con conversaciones fijas, DoorDash creó un **cliente simulado** con un LLM, armado a partir de perfiles extraídos de transcripciones reales, que conversa con la versión candidata contra **APIs mockeadas**. Después, **más de 50 jueces LLM binarios** (pass/fail con razonamiento), calibrados contra etiquetas de expertos humanos, deciden si el cambio pasa. Según la cobertura, el sistema corre más de 200 conversaciones simuladas en menos de 5 minutos.
+
+El hallazgo técnico más útil es el **case state layer**. Volcar el historial crudo de herramientas al contexto (pedidos, estados de entrega, decisiones de reembolso) provocaba alucinaciones. La solución fue sintetizarlo en una representación estructurada. Llegar a ella tomó 11 iteraciones, y una empeoró los resultados. **Según DoorDash**, el cambio redujo ~90 % las alucinaciones en simulación, y la mejora se trasladó a producción. No publicaron los modelos usados ni el esquema del case state.
+
+### Qué puedes aplicar
+
+- **Guardrails en cascada:** un chequeo barato (similitud, reglas, regex) filtra la mayoría y un juez LLM caro revisa solo los casos dudosos. Así controlas latencia y costo.
+- **Calibra a tus jueces** contra humanos antes de confiar en ellos, y prefiere evaluaciones **binarias y específicas** a puntajes de 1 a 10.
+- **Estructura el estado del caso** antes de pasarlo al modelo; no le des logs crudos. Es [context engineering](/guia/context-engineering) aplicado.
+- Si estás en Bedrock, la combinación Knowledge Bases + modelo rápido + evaluación automatizada es la misma que usó DoorDash en voz; AgentCore agrega runtime, memoria y observabilidad ([AgentCore](/guia/aws-bedrock-agentcore)).
+
+Una versión mínima del guardrail en cascada, detrás de un AI gateway con LiteLLM (ilustrativa, no es el código de DoorDash):
+
+```python title="guardrail_cascada.py"
+import numpy as np
+from litellm import completion, embedding
+
+UMBRAL = 0.82  # calíbralo con conversaciones etiquetadas, no a ojo
+
+def _emb(textos: list[str]) -> np.ndarray:
+    r = embedding(model="litellm_proxy/embeddings", input=textos)
+    return np.array([d["embedding"] for d in r.data])
+
+def respuesta_fundamentada(respuesta: str, fragmentos: list[str]) -> bool:
+    # Nivel 1: similitud entre la respuesta y cada fragmento recuperado (barato)
+    v = _emb([respuesta] + fragmentos)
+    v = v / np.linalg.norm(v, axis=1, keepdims=True)
+    if float((v[1:] @ v[0]).max()) >= UMBRAL:
+        return True
+    # Nivel 2: juez LLM binario, solo para los casos dudosos (caro)
+    juez = completion(
+        model="litellm_proxy/claude-haiku",
+        messages=[{"role": "user", "content":
+            "¿Cada afirmación de la RESPUESTA está respaldada por las FUENTES? "
+            "Responde solo SI o NO.\n\nFUENTES:\n" + "\n---\n".join(fragmentos)
+            + f"\n\nRESPUESTA:\n{respuesta}"}],
+        max_tokens=3,
+    )
+    return juez.choices[0].message.content.strip().upper().startswith("SI")
+```
+
+Si devuelve `False`, regenera una vez y, si vuelve a fallar, deriva a un humano con el contexto del caso.
+
+## Salesforce Help: Agentforce como "Customer Zero"
+
+### Contexto y escala
+
+Salesforce desplegó Agentforce en su propio portal de soporte, help.salesforce.com, en octubre de 2024. El portal tiene más de 60 millones de visitas al año y unas 2 millones de solicitudes de soporte anuales, **según la empresa**. La evolución publicada:
+
+| Fecha | Dato | Fuente |
+|---|---|---|
+| Lanzamiento (oct. 2024) | ~10 % del tráfico, solo inglés, solo usuarios autenticados; 126 conversaciones la primera semana | VentureBeat, jul. 2025 |
+| Ene. 2025 | ~32.000 conversaciones/semana, **83 %** de resolución, 1 % pide un humano | Salesforce |
+| Jul. 2025 | Más de 1 millón de conversaciones, **84 %** resuelto sin humano, casos de soporte −5 %, handoff ~5 % | VentureBeat |
+| Nov. 2025 | Más de 2 millones de conversaciones; japonés con 77 % de resolución | Salesforce |
+| Página actual (sin fecha) | Más de 5 millones de conversaciones, "más de **63 %** resueltas al instante", 7 idiomas | Salesforce |
+
+La tasa publicada **bajó** de 83–84 % en 2025 a "más de 63 %" en la página actual. Salesforce no explica la diferencia en las fuentes revisadas. Puede deberse a más idiomas y más tráfico, a casos más difíciles o a otra definición (la página actual cuenta como total las conversaciones resueltas más las abandonadas más las derivadas), pero **no está verificado**.
+
+En paralelo, Marc Benioff dijo en un podcast a fines de agosto de 2025 que la organización de soporte pasó de **unas 9.000 a unas 5.000 personas** (*"necesito menos cabezas"*). Un vocero precisó que bajó el volumen de casos y que dejaron de reponer puestos. No está claro qué parte se debe solo al agente.
+
+### Arquitectura
+
+<Diagram id="cac-salesforce-help" height={540} />
+
+Esta es una reconstrucción simplificada de publicaciones de Salesforce y de VentureBeat. El **Atlas Reasoning Engine** clasifica la intención y elige un *topic* con instrucciones y acciones. La respuesta se fundamenta en el contenido de ayuda (unas 740.000 piezas) y en datos de la cuenta desde **Data 360** (antes Data Cloud). Según VentureBeat, los fragmentos se envían a **OpenAI** para generar, sin que se conozca el modelo exacto. Para otros idiomas, el agente responde en el idioma del cliente a partir del contenido en inglés, sin traducir los artículos.
+
+### Decisiones y lecciones (las más valiosas del caso)
+
+- **El handoff de 1 % era una mala señal.** El equipo lo celebró ("chocábamos las manos", dijo Bernard Slowey a VentureBeat) hasta que leyó las conversaciones: el agente se interponía entre el cliente y una persona. Facilitaron el escalamiento y el handoff subió a ~5 %, y quienes necesitaban un humano llegaron antes.
+- **"Content collisions".** Artículos duplicados o contradictorios, como muchas versiones de cómo resetear la contraseña, confundían la recuperación. La solución fue limpiar y consolidar contenido, no cambiar el modelo.
+- **Menos reglas, más objetivo.** Una lista de competidores prohibidos hacía que el agente se negara a responder preguntas legítimas sobre integraciones con Microsoft Teams. La reemplazaron por una sola instrucción de objetivo: *"actúa en el mejor interés de Salesforce"*.
+- **Empatía.** Incorporaron a los prompts el programa de formación de los agentes humanos. En incidentes, el agente se disculpa y deriva rápido en vez de intentar diagnosticar.
+- **Despliegue gradual con métricas abiertas.** Empezaron con un piloto de 200 usuarios durante 4 semanas, luego ~10 % del tráfico, y revisan cada semana las conversaciones resueltas, abandonadas y derivadas.
+
+### Qué puedes aplicar
+
+- Mide el handoff en **ambas direcciones**: un handoff demasiado bajo puede significar clientes atrapados. Revisa muestras de conversaciones abandonadas.
+- **Audita tu corpus** antes de culpar al modelo: duplicados, versiones viejas y contradicciones son la causa número uno de respuestas erróneas en RAG de soporte ([arquitectura de soporte con RAG y MCP](/guia/arquitectura-soporte-rag-mcp)).
+- Lanza con un segmento acotado (usuarios autenticados, un idioma, un porcentaje del tráfico) y amplía con datos.
+
+## Casos breves
+
+### Lyft: asistente con Claude en Amazon Bedrock
+
+Lyft incorporó Claude, vía **Amazon Bedrock**, a su asistente de atención a fines de 2024. **Según Lyft y Anthropic** (febrero de 2025), el asistente redujo **87 % el tiempo promedio de resolución** y resuelve miles de solicitudes al día, con derivación a especialistas humanos para los casos complejos. En diciembre de 2025 Lyft describió un **"intent agent"** construido con el AWS Generative AI Innovation Center: reemplaza menús de cientos de categorías con conversación, usa datos de backend (viajes y pagos recientes), resuelve más de la mitad de las solicitudes en menos de tres minutos y funciona en inglés y español. El matiz importante lo reportó TechCrunch: Lyft marca un caso como resuelto cuando el cliente responde "sí" a *"¿Resolvimos tu problema?"*. No hay detalle público de herramientas ni de los criterios de derivación.
+
+### Deutsche Telekom: "Frag Magenta"
+
+El asistente de atención de Deutsche Telekom funciona con agentes especializados por dominio (facturación, contratos, soporte técnico) sobre su plataforma abierta LMOS. Según la empresa y Qdrant, supera los 2 millones de conversaciones en tres países. La plataforma se analiza en [plataformas internas de agentes](/guia/caso-plataformas-internas).
+
+## Comparativa
+
+| | Klarna | Intercom Fin | DoorDash | Salesforce Help |
+|---|---|---|---|---|
+| Tipo | Agente propio para sus clientes | Producto SaaS para miles de empresas | Agente propio (Dashers, clientes, comercios) | Agente propio sobre su producto |
+| Escala reportada | 2,3 M conversaciones en el 1.er mes (feb. 2024) | Más de 2 M resoluciones/semana (2026) | Cientos de miles de contactos/día (2026) | Más de 5 M conversaciones (2026) |
+| Stack publicado | OpenAI + LangGraph + LangSmith | Retrieval y reranker propios + Apex (post-entrenado); Claude en Bedrock según AWS | RAG + guardrail en 2 niveles + LLM Judge; voz con Bedrock (Claude 3 Haiku) | Agentforce (Atlas) + Data 360 + LLM de OpenAI |
+| Métrica principal | 700 → 853 empleos equivalentes (Klarna) | 56–76 % de resolución (Intercom) | −90 % alucinaciones (DoorDash) | 83–84 % (2025) → más de 63 % (actual) |
+| Control de calidad | Evals con LLM en LangSmith | Etapa de validación + modelos especializados | Guardrail en línea, jueces calibrados, simulación | Observabilidad y revisión semanal |
+| Retroceso o límite | Vuelta a la atención humana por calidad (2025) | Métricas y benchmark propios; modelo base no revelado | Latencia por guardrails; línea base no publicada | Handoff 1 % dañaba la experiencia; caída de la tasa publicada |
+
+## Patrones y lecciones comunes
+
+1. **La recuperación pesa más que el modelo.** Intercom invirtió primero en un reranker, Salesforce limpió su corpus y DoorDash atribuyó muchas fallas a vacíos en la KB. Antes de cambiar de LLM, mide y mejora el retrieval ([RAG](/guia/rag)).
+2. **Verificar antes de responder.** Intercom y DoorDash publicaron una etapa explícita de validación **en línea** antes de que el cliente vea la respuesta: la validación de Fin y el guardrail de DoorDash. Salesforce no describió una etapa equivalente; su control visible es la observabilidad y la revisión semanal. Diseñar la validación en cascada (barato primero, juez LLM después) mantiene la latencia bajo control.
+3. **Evaluación como infraestructura.** Jueces LLM calibrados contra humanos, regresión en cada cambio de prompt y, en el nivel más maduro, simulación de clientes antes del despliegue ([evaluación y observabilidad](/guia/evaluacion-observabilidad)).
+4. **El humano es parte del diseño, no un fallo.** Klarna y Salesforce, los dos casos con más presión por automatizar, terminaron haciendo **más fácil** llegar a una persona. Diseña el escalamiento con disparadores explícitos y un resumen estructurado, como en la [arquitectura de referencia](/guia/arquitectura-soporte-rag-mcp).
+5. **Las métricas de resolución son definiciones.** "No escaló", "dijo que sí" o "resuelta + abandonada + derivada" dan números muy distintos. Define la tuya, publícala internamente y acompáñala de recontacto y satisfacción.
+6. **Modelos chicos y especializados donde importa la latencia.** DoorDash usó Claude 3 Haiku para voz con un objetivo de 2,5 s, e Intercom entrenó un reranker sobre ModernBERT y un generador propio. El modelo frontera no siempre es la pieza correcta para cada etapa, y un [AI gateway](/guia/gateways) facilita mezclar modelos por etapa.
+7. **Despliegue gradual.** Salesforce empezó con 200 usuarios y luego un 10 % del tráfico; DoorDash usó A/B y gates de evaluación. Nadie de esta lista lanzó para el 100 % el primer día.
+
+<KeyPoints title="En resumen">
+
+- Los cuatro casos superan el millón de conversaciones, pero **sus cifras son auto-reportadas** y sus definiciones de resolución no son comparables.
+- **Klarna** muestra el riesgo de optimizar solo el costo: el agente siguió creciendo (853 empleos equivalentes según la empresa), pero la atención humana volvió como diferenciador.
+- **Intercom Fin** es un pipeline de modelos especializados (retrieval, reranker, generador, validación) con precio por resolución; su primera apuesta propia fue la recuperación.
+- **DoorDash** aporta los patrones de calidad más reutilizables: guardrail en cascada, jueces binarios calibrados, simulación con APIs mockeadas y un estado del caso estructurado.
+- **Salesforce Help** enseña que un handoff demasiado bajo es una señal de alarma y que el contenido duplicado rompe el RAG.
+- Lo común: retrieval primero, verificar antes de responder, evaluación continua, escalamiento fácil y despliegue gradual.
+
+</KeyPoints>
+
+## Siguientes pasos
+
+<Cards cols={3}>
+  <Card title="Arquitectura de soporte con RAG y MCP" href="/guia/arquitectura-soporte-rag-mcp">Lleva estas lecciones a un diseño concreto: canales, RAG con ACL, herramientas MCP, reembolsos con aprobación y escalamiento.</Card>
+  <Card title="Evaluación y observabilidad" href="/guia/evaluacion-observabilidad">Sets dorados, jueces LLM, pass^k y trazas en producción, la base del flywheel de DoorDash.</Card>
+  <Card title="RAG" href="/guia/rag">Búsqueda híbrida, reranking y evaluación de retrieval, la palanca que más usaron Intercom y Salesforce.</Card>
+  <Card title="Seguridad y gobernanza" href="/guia/seguridad-gobernanza">Guardrails, PII, agencia excesiva y auditoría para agentes que hablan con clientes.</Card>
+  <Card title="Amazon Bedrock AgentCore" href="/guia/aws-bedrock-agentcore">Runtime, memoria, gateway y observabilidad para desplegar un agente de soporte en AWS.</Card>
+  <Card title="Todos los casos reales" href="/guia/casos-reales">Migraciones de código, investigación multiagente, datos, finanzas y plataformas internas.</Card>
+</Cards>

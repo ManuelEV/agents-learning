@@ -1,0 +1,307 @@
+La investigación abierta es el terreno donde los sistemas **multiagente** han demostrado su valor con más claridad. Una pregunta como "¿conviene entrar al mercado peruano con este formato de tienda?" no tiene un camino fijo: hay que explorar regulación, competencia, datos internos y prensa, descartar pistas, seguir otras y consolidar todo con fuentes. Esa tarea se divide bien en ramas independientes, cada rama consume mucho contexto y el resultado vale lo suficiente para pagar el costo extra.
+
+Esta página analiza cuatro sistemas en producción con documentación técnica pública: **Anthropic Research** (el caso ancla), **LinkedIn Hiring Assistant**, **Thomson Reuters Deep Research** y **Exa**. Además, usa **OpenAI deep research** como contraste de agente único. Para cada uno verás arquitectura, decisiones, cifras con su fuente y fecha, límites y qué puedes llevarte a tu stack. Fechas de referencia: noviembre de 2026; los sistemas se describen según lo que cada empresa publicó en su momento (2025).
+
+<Callout type="warning" title="Cómo leer las cifras y los diagramas">
+Casi todas las cifras de esta página son **auto-reportadas** por la empresa que construyó el sistema, con evaluaciones internas que no se pueden reproducir. Cuando una cifra viene de prensa o de un resumen de terceros, lo indicamos. Los diagramas son **reconstrucciones simplificadas** a partir de los textos públicos, no diagramas oficiales.
+</Callout>
+
+## Por qué la investigación pide varios agentes
+
+Un agente único que investiga acumula en una sola ventana de contexto todas las búsquedas, páginas leídas y razonamientos. Pasado cierto punto, el contexto se llena de material irrelevante y el agente pierde el hilo. Los cuatro casos resuelven ese problema de la misma forma: **separar la exploración en contextos aislados y devolver al coordinador solo lo esencial**. Es el patrón orquestador-trabajadores descrito en [patrones de diseño](/guia/patrones-de-diseno), con una idea de [context engineering](/guia/context-engineering) de fondo: cada subagente funciona como un compresor de información. Las condiciones que justifican el costo se repiten: ramas independientes, más información de la que cabe en un contexto, muchas herramientas distintas y alto valor por respuesta.
+
+## Caso 1: Anthropic Research (caso ancla)
+
+### Contexto
+
+En junio de 2025 Anthropic publicó cómo construyó la función **Research** de Claude, que busca en la web, en Google Workspace y en integraciones para responder preguntas complejas. El post (13-06-2025) es, hasta hoy, la descripción pública más detallada de un sistema multiagente de investigación en producción, y varios equipos lo citan como su modelo. Exa lo dice de forma explícita en su caso.
+
+### Arquitectura
+
+<Diagram ids={["cim-anthropic-flujo", "cim-anthropic-produccion"]} height={540} />
+
+El sistema tiene tres roles:
+
+- **Agente líder** (*LeadResearcher*, Claude Opus 4 en ese momento): analiza la consulta, define una estrategia, decide cuántos subagentes lanzar y qué hará cada uno, y sintetiza los resultados. Si falta información, lanza otra ronda.
+- **Subagentes** (Claude Sonnet 4): cada uno con su propio contexto, herramientas, prompt y límites de tarea. Buscan de forma iterativa y devuelven hallazgos condensados.
+- **CitationAgent**: recibe el informe y los documentos, y ubica dónde va cada cita para que toda afirmación tenga una fuente.
+
+La **memoria** cumple un papel concreto: el líder guarda su plan fuera del contexto porque, pasados los 200.000 tokens, el contexto se trunca. En investigaciones largas, los agentes resumen las fases terminadas, guardan lo esencial en memoria externa y, cerca del límite, lanzan subagentes nuevos con contexto limpio y un traspaso cuidadoso.
+
+Anthropic contrasta este diseño con el RAG clásico. Un RAG recupera una vez los fragmentos más parecidos a la consulta. Aquí, en cambio, la búsqueda tiene varios pasos y se adapta a lo que va encontrando.
+
+### Escala y cifras
+
+| Cifra | Qué mide | Fuente y fecha | Tipo |
+|---|---|---|---|
+| **+90,2 %** | Multiagente (Opus 4 + Sonnet 4) frente a Opus 4 como agente único | Anthropic, eval interna de investigación, jun 2025 | Auto-reportada |
+| **80 %** | Varianza de desempeño en BrowseComp explicada solo por el uso de tokens (95 % junto con número de llamadas a herramientas y modelo) | Anthropic, jun 2025 | Auto-reportada |
+| **~4× / ~15×** | Tokens de un agente y de un sistema multiagente frente a un chat | Anthropic, jun 2025 | Auto-reportada |
+| **3–5** subagentes, **3+** herramientas c/u | Paralelismo típico en consultas complejas | Anthropic, jun 2025 | Descripción de diseño |
+| **Hasta −90 %** | Reducción del tiempo de investigación en consultas complejas gracias al paralelismo | Anthropic, jun 2025 | Auto-reportada |
+| **−40 %** | Tiempo de tarea tras reescribir con un agente las descripciones de herramientas defectuosas | Anthropic, jun 2025 | Auto-reportada |
+
+El dato de los tokens es la clave para entender el caso. Si el uso de tokens explica la mayor parte del desempeño, un sistema multiagente funciona en buena medida como una forma de **gastar más tokens en paralelo**, cada uno en un contexto limpio. Anthropic añade un matiz: pasar a un modelo mejor (Sonnet 4) dio más ganancia que duplicar el presupuesto de tokens del modelo anterior (Sonnet 3.7). O sea, los tokens importan, pero no compensan un modelo inferior.
+
+### Decisiones técnicas
+
+**Delegación explícita.** Las primeras versiones daban instrucciones vagas a los subagentes ("investiga la escasez de semiconductores"), y el resultado eran búsquedas duplicadas y vacíos. La solución fue que el líder entregue a cada subagente cuatro cosas: **objetivo, formato de salida, guía de herramientas y fuentes, y límites claros**. Si tus subagentes repiten trabajo, revisa esto antes que cualquier otra cosa.
+
+**Presupuesto de esfuerzo en el prompt.** Un fallo temprano: lanzar **50 subagentes** para preguntas simples. La corrección fueron reglas de escala escritas en el prompt del líder:
+
+| Tipo de consulta | Esfuerzo indicado |
+|---|---|
+| Dato puntual | 1 agente, 3–10 llamadas a herramientas |
+| Comparación directa | 2–4 subagentes, 10–15 llamadas cada uno |
+| Investigación compleja | Más de 10 subagentes con responsabilidades separadas |
+
+**Herramientas como interfaz.** Anthropic trata la descripción de cada herramienta con el cuidado de una interfaz de usuario. Cada herramienta debe tener un propósito distinto y una descripción clara, y el agente debe revisar las disponibles antes de elegir. Un agente de prueba que usaba herramientas MCP defectuosas y luego reescribía sus descripciones logró el −40 % de tiempo citado arriba.
+
+**Buscar amplio y luego estrechar.** Los agentes tienden a lanzar consultas largas y específicas que devuelven poco. El prompt los empuja a empezar con consultas cortas y amplias, evaluar qué hay y luego acotar. También se agregaron heurísticas de calidad de fuentes, porque los agentes preferían granjas de contenido SEO sobre fuentes autorizadas.
+
+**Pensamiento guiado.** El líder usa *extended thinking* para planificar, y los subagentes usan *interleaved thinking* después de cada resultado de herramienta para juzgar su calidad y decidir la siguiente búsqueda.
+
+**Evaluación desde el día uno, con pocos casos.** Anthropic empezó con unas **20 consultas** de uso real. Cuando los cambios tienen efectos grandes, 20 casos bastan para verlos. El evaluador es un **LLM-judge** con rúbrica de cinco criterios: precisión factual, precisión de citas, completitud, calidad de fuentes y eficiencia en el uso de herramientas. La versión que más se alineó con humanos fue una sola llamada que devuelve un puntaje de 0,0 a 1,0 y un pass/fail. Los evaluadores humanos siguieron siendo necesarios para detectar alucinaciones en consultas raras y sesgos de selección de fuentes. El criterio general: **evaluar el resultado final, no el camino**, porque hay muchas rutas válidas. Profundizamos en esto en [evaluación y observabilidad](/guia/evaluacion-observabilidad).
+
+**Errores y estado.** Los agentes corren mucho tiempo y mantienen estado, así que un error pequeño se compone. Anthropic construyó **ejecución durable** que reanuda desde el punto de falla en lugar de reiniciar, y combina dos mecanismos: reintentos deterministas y **checkpoints**, más la adaptabilidad del modelo (avisarle que una herramienta falla para que cambie de enfoque). Para depurar comportamiento no determinista usan **tracing completo** en producción y monitorean patrones de decisión e interacción, pero sin leer el contenido de las conversaciones.
+
+**Despliegue.** Como siempre hay agentes a mitad de una tarea, un despliegue normal los cortaría. Usan **rainbow deployments**: la versión vieja y la nueva corren a la vez y el tráfico pasa de una a otra gradualmente.
+
+**Artefactos fuera del contexto.** Para evitar el "teléfono roto" y ahorrar tokens, los subagentes pueden escribir sus resultados en almacenamiento externo y pasar al coordinador solo una referencia.
+
+### Límites y costos
+
+- **Costo:** ~15× los tokens de un chat. Anthropic lo dice sin rodeos: solo tiene sentido si el valor de la tarea lo paga.
+- **Ejecución síncrona:** el líder espera a que termine cada lote de subagentes. No puede corregirlos a mitad de camino, ellos no se coordinan entre sí y un subagente lento bloquea todo. La ejecución asíncrona daría más paralelismo, pero complica la coordinación, la consistencia del estado y la propagación de errores.
+- **Mal encaje en tareas con dependencias:** según el propio post, la mayoría de las tareas de programación tienen menos partes paralelizables que la investigación, y los agentes actuales todavía coordinan y delegan mal en tiempo real.
+
+### Qué puedes aplicar tú
+
+- Escribe **reglas de esfuerzo** en el prompt del orquestador y ponle un límite duro de subagentes y turnos en el código.
+- Define un **contrato de delegación** (objetivo, formato, fuentes, límites) y valídalo con un esquema.
+- Usa un modelo caro para planificar y sintetizar y uno más barato para los trabajadores. En tu gateway, cada rol puede tener su propia clave virtual y presupuesto (ver [gateways](/guia/gateways)).
+- Empieza con **20 casos reales** y un juez con rúbrica antes de optimizar nada.
+- Planifica para fallos desde el diseño: checkpoints y reanudación, como se explica en [orquestación avanzada](/guia/orquestacion-avanzada).
+
+## Caso 2: LinkedIn Hiring Assistant
+
+### Contexto
+
+**Hiring Assistant** es el primer agente de LinkedIn para reclutadores. Llegó a clientes piloto en octubre de 2024 y quedó disponible globalmente en inglés a fines de septiembre de 2025. No es un sistema de "investigación" en sentido estricto, pero sí un flujo de conocimiento de alto valor y larga duración, y su arquitectura es el ejemplo público más completo de **supervisor con sub-agentes especializados** a escala de producto masivo. LinkedIn lo describió en su blog de ingeniería el 21-10-2025.
+
+### Escala y resultados
+
+- **Más de 1.200 millones de perfiles** como base de sourcing y evaluación, con jobs de fondo sobre millones de perfiles y refresco diario (LinkedIn Engineering, oct 2025).
+- Los **early adopters** reportan **más de 4 horas ahorradas por vacante**, **62 % menos perfiles revisados** y **+69 % en aceptación de InMail** (LinkedIn, comunicado del 03-09-2025). LinkedIn no publicó metodología, tamaño de muestra ni línea base: trátalas como cifras de marketing auto-reportadas.
+- Ni el post de ingeniería ni el comunicado incluyen métricas de precisión del evaluador de candidatos.
+
+### Arquitectura
+
+<Diagram id="cim-linkedin" height={540} />
+
+Tres decisiones definen el diseño:
+
+1. **Una instancia por reclutador, guiada por mensajes.** Cada reclutador tiene su propio Hiring Assistant, con identidad y **buzón** propios, sobre la plataforma de agentes de LinkedIn. El ciclo de vida lo maneja el **paso de mensajes asíncrono**, no una petición HTTP abierta. Así el agente puede trabajar durante días en una vacante (buscar, esperar respuestas de candidatos, hacer seguimiento) sin depender de una sesión activa.
+2. **Supervisor plan-and-execute.** Todo pasa por un supervisor que enruta tareas, gestiona el workflow, observa cambios del entorno y presenta lo que requiere aprobación humana. Internamente, un *planner* genera un plan estructurado y un *executor* lo ejecuta con un bucle ReAct para las herramientas. LinkedIn eligió esto sobre un ReAct puro por tres razones: mejor seguimiento de instrucciones, más control de las alucinaciones y un mejor equilibrio entre costo y latencia.
+3. **Sub-agentes modelados como herramientas.** Intake, sourcing, evaluación, outreach, screening, learning y memoria cognitiva son especialistas, pero LinkedIn los implementa como **herramientas** del supervisor, sin identidad ni buzón propios. Es una decisión pragmática: tienes la modularidad de los sub-agentes (desarrollo y evaluación por separado) sin el costo de coordinar agentes autónomos.
+
+Otros componentes: **memoria cognitiva** persistente y acotada a cada reclutador, que según LinkedIn no se usa para entrenar modelos; un **SDK cliente** embebido en Recruiter; una API **GraphQL** que permite UI dirigida por el agente; y un canal **pub-sub** para actualizaciones en tiempo real.
+
+<Callout type="info" title="¿LangGraph?">
+Medios como Computer Weekly reportaron que Hiring Assistant usa LangGraph. El post de ingeniería de LinkedIn **no lo menciona**: habla de su propia plataforma y framework de agentes. No pudimos verificar el dato en una fuente primaria.
+</Callout>
+
+### Decisiones técnicas
+
+- **Modelos propios para el paso crítico.** La evaluación de candidatos usa **LLMs afinados por LinkedIn** y *speculative decoding* para tardar segundos por candidato. LinkedIn sostiene que los modelos genéricos no daban la precisión ni la escala necesarias. El resto del sistema no detalla qué modelos usa.
+- **Calidad en dos pilares.** Por un lado, la **política de producto**, que alimenta jueces LLM. Por otro, la **alineación humana**: datasets anotados y la actividad real de los reclutadores (por ejemplo, que un reclutador contacte a un candidato cuenta como señal positiva fuerte). Además, hay benchmarks por escenario para probar cada versión del agente evaluador antes de liberarla.
+- **Humano en el bucle en cada punto de riesgo.** El reclutador aprueba las calificaciones del rol antes de evaluar candidatos, toma la decisión final sobre cada candidato, aprueba los cambios que propone el agente de learning y puede tomar el control del screening cuando quiera.
+
+### Límites
+
+Sin métricas de precisión publicadas, no es posible comparar la calidad del evaluador con la de un reclutador humano. El dominio (decisiones de contratación) es sensible a sesgos, y eso explica la cantidad de puntos de aprobación. El diseño "sub-agentes como herramientas" también admite que coordinar agentes realmente autónomos tenía más costo que beneficio.
+
+### Qué puedes aplicar tú
+
+- Para flujos que duran días, usa **mensajería asíncrona y estado durable** en vez de sesiones largas (ver [orquestación avanzada](/guia/orquestacion-avanzada)).
+- Empieza con **sub-agentes como herramientas** del orquestador. En ADK eso es `AgentTool`; en Strands, *agents as tools*. Pasa a agentes autónomos o a [A2A](/guia/a2a) solo cuando cruces una frontera de equipo o de confianza.
+- Usa las señales de comportamiento de tus usuarios como datos de evaluación, no solo jueces LLM.
+
+## Caso 3: Thomson Reuters Deep Research
+
+### Contexto
+
+Thomson Reuters lanzó **Deep Research** en Westlaw Advantage y **CoCounsel Legal** el 05-08-2025. Es un sistema agéntico de investigación jurídica que planifica una estrategia, ejecuta herramientas de Westlaw y entrega un informe con citas. TR insiste en que no es una conexión a los productos de *deep research* de los proveedores de modelos: su diferencial es el contenido editorial curado de Westlaw y Practical Law, y las herramientas construidas sobre él.
+
+### Escala y cifras
+
+- **Más de un año** probando modelos frontera en flujos de investigación legal, y **más de 1.200 clientes** que revisaron y probaron diseños y planes antes del lanzamiento (Mike Dahn, TR, 05-08-2025).
+- Trabajo que tomaba horas pasa a tomar minutos, según TR, sin métricas publicadas.
+- Según el resumen de ZenML del post de ingeniería de TR Labs, los análisis más completos toman **alrededor de 10 minutos**. No pudimos leer el post original, así que trátalo como un dato no verificado.
+- TR no publicó métricas de precisión ni comparaciones contra investigadores humanos.
+
+### Arquitectura
+
+<Diagram id="cim-thomson" height={540} />
+
+Lo que TR dijo públicamente:
+
+- **Varios agentes con roles**: Omar Bari, VP de Applied Research en TR Labs, mencionó agentes de investigación, planificación, descubrimiento y orquestación, y la necesidad de lanzarlos en paralelo (Constellation Research, 05-08-2025).
+- **Andamiaje propio**: "construimos el andamiaje del agente nosotros mismos", dijo Bari. No usaron un framework de terceros para la orquestación.
+- **Herramientas de dominio**: los agentes ejecutan en paralelo herramientas como KeyCite, Key Numbers, clasificaciones de Precision Research y anotaciones de leyes. TR atribuye al paralelismo buena parte de la ganancia de velocidad.
+- **Modelos por tarea**: David Wong, CPO, dijo que eligen el modelo más adecuado para cada tarea y que tienen contratos con OpenAI, Google y Anthropic. El resumen de ZenML del post de TR Labs agrega que al lanzamiento usaban Claude 4 para orquestar herramientas (no verificado en el original).
+- **Proceso de experto**: los planes se diseñaron con abogados de Westlaw y Practical Law para imitar cómo investiga un profesional entrenado.
+
+### Decisiones técnicas
+
+Según el resumen de ZenML del post de TR Labs (fuente secundaria): las funciones de Westlaw se rediseñaron como **bloques modulares para agentes** (buscar, abrir documentos, alertas de KeyCite, seguir referencias de casos); los **criterios de parada** resultaron más difíciles de lo esperado; la evaluación se basa en objetivos editoriales (completitud, corrección) desglosados en decenas de rúbricas, con evaluadores automáticos calibrados contra juicio humano y una revisión manual que TR describe como costosa pero necesaria. El flujo se plantea como un ciclo de **generación y verificación**: el sistema genera y el abogado verifica con citas, alertas de KeyCite y fragmentos resaltados.
+
+Bari resumió la dificultad de forma clara: llegar a un prototipo es fácil, pero producción exige trabajar cada detalle de la orquestación, con ajuste continuo de function calling, instrucciones, evaluación, gestión de memoria y orquestación.
+
+### Límites
+
+Los retos que TR reconoce (vía ZenML): equilibrar exhaustividad y ruido, los matices del lenguaje legal y los límites de la ventana de contexto. El costo por consulta no es público.
+
+### Qué puedes aplicar tú
+
+- Tu ventaja está en tus **herramientas y datos propietarios**, no en el orquestador. Rediseña tus sistemas internos como herramientas pequeñas y bien descritas (vía [MCP](/guia/mcp)).
+- Pide a expertos del dominio que escriban el **proceso** que debe seguir el agente y úsalo como plan base.
+- Diseña la salida para que un humano pueda **verificarla** rápido: citas, fragmentos y alertas.
+
+## Caso 4: Exa
+
+### Contexto
+
+Exa ofrece una API de búsqueda para aplicaciones de IA. Su **deep research agent**, el primer producto agéntico de la empresa, está pensado para que otros sistemas lo consuman por API, no para un chat. LangChain publicó el caso el 30-06-2025.
+
+### Escala y cifras
+
+- **Cientos de consultas de investigación al día**, con respuestas en **15 segundos a 3 minutos** según la complejidad (LangChain, caso de cliente, jun 2025, auto-reportado).
+- Exa no publicó métricas de calidad ni qué modelos usa.
+
+### Arquitectura
+
+<Diagram id="cim-exa" height={520} />
+
+Construido completamente sobre **LangGraph**, con tres roles:
+
+- **Planner**: analiza la consulta y genera tareas paralelas. El número de tareas cambia según la complejidad de la consulta.
+- **Tareas**: unidades de investigación independientes, cada una con instrucciones específicas, un **esquema JSON** obligatorio para su salida y acceso a las herramientas de Exa.
+- **Observer**: mantiene el contexto completo de planificación, razonamiento, salidas y citas.
+
+La decisión de contexto más interesante: las tareas solo reciben las **salidas finales y limpias** de otras tareas, nunca su razonamiento intermedio. Es la misma idea de compresión de Anthropic, aplicada de forma explícita.
+
+### Decisiones técnicas
+
+- **Snippets primero.** El agente razona sobre fragmentos de resultados de búsqueda y pide el contenido completo de una página solo cuando los fragmentos no alcanzan. Según Exa, esto reduce tokens sin perder calidad. Es una táctica de presupuesto de tokens que puedes copiar tal cual en un RAG o en un agente de búsqueda.
+- **Salida estructurada en todos los niveles**, generada con function calling y con formato definido en tiempo de ejecución por el cliente.
+- **Observabilidad para fijar precios.** Con LangSmith, Exa midió tokens, tasa de aciertos de caché y tokens de razonamiento por ejecución, y usó esos datos para definir sus precios de producción. Mark Pekala, ingeniero de Exa, dijo que entender el uso de tokens fue "realmente importante".
+
+### Qué puedes aplicar tú
+
+- Mide el **costo por ejecución** desde el primer prototipo: sin ese número no puedes decidir si el multiagente se paga.
+- Usa **esquemas de salida** entre agentes. El JSON validado es un contrato; la prosa libre es una fuente de errores al sintetizar.
+- Aplica **lectura progresiva**: primero resúmenes o fragmentos, y documentos completos solo si hacen falta.
+
+## Contraste: OpenAI deep research, un solo agente entrenado
+
+OpenAI lanzó **deep research** el 02-02-2025 con otro enfoque. Según su anuncio, no lo construyó orquestando varios agentes por prompts: entrenó un modelo (una versión temprana de **o3**, según su system card del 25-02-2025) con **aprendizaje por refuerzo de punta a punta** en tareas difíciles de navegación y razonamiento con browser y Python. Puede tardar **de 5 a 30 minutos**, alcanzó **26,6 %** en Humanity's Last Exam en febrero de 2025 (cifra de OpenAI) y la propia OpenAI reconoció sus límites: puede alucinar hechos, calibra mal su confianza y es **muy intensivo en cómputo**.
+
+La lección para ti es que el multiagente es una forma de **conseguir con orquestación lo que un modelo no hace solo**. Si tienes un modelo entrenado para la tarea, un agente único puede bastar. La mayoría de las empresas no entrena modelos, así que su palanca real es la arquitectura: separar contextos, paralelizar y comprimir. Hay un camino intermedio: integrar el deep research de un proveedor. Harvey, por ejemplo, afirma que integró la API de deep research de OpenAI en su plataforma legal menos de 12 horas después de su lanzamiento (Harvey, 03-07-2025). Thomson Reuters eligió lo contrario porque su diferencial son las herramientas y el contenido propietarios.
+
+## Llevarlo a tu stack: ADK + gateway + Bedrock
+
+El patrón de Anthropic se puede aproximar en Google ADK con un `ParallelAgent` de investigadores y un sintetizador, enrutando los modelos por tu AI gateway. Ejemplo: una cadena de retail que evalúa entrar a un nuevo país.
+
+```python title="investigacion/agent.py"
+import os
+from google.adk.agents.llm_agent import LlmAgent
+from google.adk.agents.parallel_agent import ParallelAgent
+from google.adk.agents.sequential_agent import SequentialAgent
+from google.adk.models.lite_llm import LiteLlm
+from herramientas import buscar_web, buscar_informes_internos   # FunctionTools propias
+
+def via_gateway(alias: str) -> LiteLlm:
+    # Cada alias del gateway apunta a un modelo de Bedrock y tiene su propio presupuesto
+    return LiteLlm(model=f"litellm_proxy/{alias}", api_base=os.environ["AI_GATEWAY_URL"],
+                   api_key=os.environ["AI_GATEWAY_KEY"])
+
+TRABAJADOR, LIDER = via_gateway("claude-sonnet"), via_gateway("claude-opus")
+CONTRATO = (" Devuelve como máximo 250 palabras: hallazgos, URL de cada fuente y vacíos. "
+            "Haz entre 3 y 10 búsquedas: empieza con consultas amplias y luego acota.")
+
+regulacion = LlmAgent(name="regulacion", model=TRABAJADOR, tools=[buscar_web],
+    output_key="hallazgos_regulacion",
+    instruction="Investiga requisitos regulatorios para abrir tiendas de retail en Perú." + CONTRATO)
+competencia = LlmAgent(name="competencia", model=TRABAJADOR, tools=[buscar_web],
+    output_key="hallazgos_competencia",
+    instruction="Mapea a los 5 principales competidores de retail de conveniencia en Lima." + CONTRATO)
+interno = LlmAgent(name="interno", model=TRABAJADOR, tools=[buscar_informes_internos],
+    output_key="hallazgos_internos",
+    instruction="Resume aprendizajes de nuestras aperturas en Chile y Colombia." + CONTRATO)
+
+investigacion = ParallelAgent(name="investigacion", sub_agents=[regulacion, competencia, interno])
+sintesis = LlmAgent(name="sintesis", model=LIDER,
+    instruction="Redacta un informe de entrada al mercado con estos hallazgos:\n"
+                "{hallazgos_regulacion}\n{hallazgos_competencia}\n{hallazgos_internos}\n"
+                "Cita la URL de cada afirmación y señala contradicciones entre fuentes.")
+root_agent = SequentialAgent(name="informe_mercado", sub_agents=[investigacion, sintesis])
+```
+
+Tres diferencias honestas con el sistema de Anthropic:
+
+- **Fan-out estático.** `ParallelAgent` fija los subagentes al definir el agente. El líder de Anthropic decide en tiempo de ejecución cuántos lanzar y con qué instrucciones. Para eso necesitas un orquestador LLM que invoque agentes como herramienta (`AgentTool`) o tu propio código de coordinación, con un tope de subagentes en el código.
+- **ADK 2.0.** En ADK 2.0 para Python, los *workflow agents* (`SequentialAgent`, `ParallelAgent`, `LoopAgent`) quedaron reemplazados por los *graph workflows*, aunque siguen funcionando (estado a fines de octubre de 2026). Para un sistema nuevo, evalúa el grafo.
+- **Lo de producción no viene incluido.** Checkpoints, reanudación, presupuestos y rainbow deployments son responsabilidad de tu runtime: Agent Runtime en Google, AgentCore Runtime en AWS o un motor durable (ver [orquestación avanzada](/guia/orquestacion-avanzada)).
+
+Si trabajas del lado de AWS, el blog de Machine Learning de AWS publicó el 15-06-2026 una **arquitectura de referencia** (no un caso de cliente): un coordinador con LangChain Deep Agents y Claude en Bedrock lanza tres subagentes de navegación en paralelo, cada uno en su propia microVM de AgentCore Browser, más un analista con AgentCore Code Interpreter, memoria en AgentCore Memory y trazas OpenTelemetry en CloudWatch con un span por subagente. Según el post, ejecutarlo de forma secuencial tardaría hasta 3× más (es una estimación, no un benchmark).
+
+## Tabla comparativa
+
+| | Anthropic Research | LinkedIn Hiring Assistant | Thomson Reuters Deep Research | Exa |
+|---|---|---|---|---|
+| Fecha de la fuente principal | 13-06-2025 | 21-10-2025 | 05-08-2025 | 30-06-2025 |
+| Patrón | Líder + subagentes paralelos + agente de citas | Supervisor plan-and-execute + sub-agentes como herramientas | Agentes por rol (planificación, investigación, descubrimiento, orquestación) | Planner + tareas paralelas + observer |
+| Framework | Propio | Plataforma propia (prensa menciona LangGraph, sin confirmar) | Andamiaje propio | LangGraph + LangSmith |
+| Modelos | Opus 4 (líder), Sonnet 4 (subagentes) | LLMs afinados propios para evaluación | Varios proveedores por tarea | No publicados |
+| Coordinación | Síncrona por lotes | Mensajería asíncrona, una instancia por usuario | Paralela (detalles no publicados) | Paralela, salidas limpias compartidas |
+| Memoria | Plan en memoria externa, artefactos | Memoria cognitiva por reclutador | Entre sesiones (vía ZenML) | Observer con contexto completo |
+| Evaluación | ~20 casos, LLM-judge con rúbrica + humanos | Jueces LLM por política + señales humanas | Rúbricas editoriales + evaluadores calibrados + revisión manual (vía ZenML) | Observabilidad de tokens; calidad no publicada |
+| Cifra principal | +90,2 % vs agente único (eval interna) | 4+ h ahorradas por vacante (early adopters) | 1.200+ clientes probaron los diseños | 15 s – 3 min, cientos de consultas/día |
+| Humano en el bucle | Revisión de la respuesta | Aprobación en cada punto de riesgo | El abogado verifica | El cliente de la API |
+
+## Cuándo NO usar multiagente
+
+Lo más útil de estos casos son los límites que sus propios autores reconocen:
+
+- **Cuando las subtareas dependen unas de otras.** Anthropic lo dice: los dominios que requieren contexto compartido o muchas dependencias entre agentes encajan mal, y la mayoría de las tareas de código tienen pocas partes paralelizables. Cognition (12-06-2025) llega a la misma conclusión desde la programación: dos subagentes en paralelo toman decisiones implícitas que chocan entre sí, y por eso recomienda un agente lineal con compresión de historial.
+- **Cuando la tarea no vale 15× los tokens.** Para un dato puntual, la regla de Anthropic es un solo agente y pocas llamadas.
+- **Cuando necesitas coordinación en tiempo real.** Los subagentes de Anthropic no se comunican entre sí y el líder no puede corregirlos a mitad de camino.
+- **Cuando un agente con herramientas basta.** LinkedIn, con un problema grande, implementó sus especialistas como herramientas y no como agentes autónomos.
+- **Cuando no puedes medir.** Exa y Anthropic coinciden: sin observabilidad de tokens y sin evaluación, no sabrás si el sistema se paga ni si mejora.
+
+<Callout type="tip" title="Regla práctica">
+Empieza con un agente único bien instrumentado. Pasa a orquestador-trabajadores cuando tengas **evidencia** de que el contexto se satura o de que hay ramas independientes que podrían ir en paralelo, y cuando el valor por consulta pague el multiplicador de tokens. Para otros dominios, revisa los casos de [atención al cliente](/guia/caso-atencion-cliente), [migraciones de código](/guia/caso-migraciones-codigo), [datos y analítica](/guia/caso-datos-analitica), [servicios financieros](/guia/caso-servicios-financieros) y [plataformas internas](/guia/caso-plataformas-internas).
+</Callout>
+
+<KeyPoints title="En resumen">
+
+- Los cuatro sistemas usan el mismo núcleo: **un coordinador que divide, trabajadores con contexto aislado que comprimen y una síntesis con citas**.
+- Según Anthropic, el uso de tokens explica el 80 % de la varianza de desempeño en BrowseComp. El multiagente es, en buena parte, una forma de gastar más tokens en paralelo y con contextos limpios, a ~15× el costo de un chat.
+- La calidad depende de cosas poco vistosas: **contrato de delegación, reglas de esfuerzo, buenas descripciones de herramientas y salidas estructuradas**.
+- Producción exige **estado durable, reanudación, tracing y despliegues sin cortar sesiones**. LinkedIn resolvió la larga duración con mensajería asíncrona e instancias por usuario.
+- Evalúa desde el primer día con **pocos casos reales y un juez con rúbrica**, y valida con humanos. Casi todas las cifras públicas son auto-reportadas.
+- No uses multiagente para tareas con muchas dependencias, de bajo valor o que un agente con herramientas ya resuelve.
+
+</KeyPoints>
+
+## Siguientes pasos
+
+<Cards cols={3}>
+  <Card title="Casos reales: panorama" href="/guia/casos-reales">Mapa de la sección y criterios para leer los casos.</Card>
+  <Card title="Patrones de diseño" href="/guia/patrones-de-diseno">Orquestador-trabajadores, enrutamiento y cuándo escalar a multiagente.</Card>
+  <Card title="Context engineering" href="/guia/context-engineering">Compresión, memoria externa y aislamiento de contexto.</Card>
+  <Card title="Orquestación avanzada" href="/guia/orquestacion-avanzada">Ejecución durable, checkpoints y workflows en grafo.</Card>
+  <Card title="Evaluación y observabilidad" href="/guia/evaluacion-observabilidad">LLM-judge, rúbricas, trazas y costo por ejecución.</Card>
+  <Card title="Multiagente con A2A" href="/guia/arquitectura-multiagente-a2a">Arquitectura de referencia con ADK, Strands y A2A.</Card>
+</Cards>

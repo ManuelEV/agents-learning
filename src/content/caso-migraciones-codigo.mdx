@@ -1,0 +1,300 @@
+Las migraciones de código son, probablemente, el caso de uso de agentes con **más evidencia pública en empresas grandes**. La razón es estructural: el trabajo se divide en miles de unidades parecidas (archivos, módulos, repos), cada unidad tiene un **oráculo automático** que dice si quedó bien (compila, pasan los tests, pasa el linter) y el resultado termina en un PR que un humano ya sabía revisar. Esa combinación —**fan-out**, **verificación determinista** y **humano en el PR**— aparece en todos los casos públicos serios.
+
+Esta página analiza cinco: **Airbnb** (tests de Enzyme a React Testing Library), **Google** (IDs de `int32` a `int64` y otras migraciones internas), **Amazon** (upgrades de Java con Amazon Q Developer y su sucesor, AWS Transform custom), **Spotify** (Honk, su agente de fondo para cambios de flota) y **Nubank** con Devin (partición de un monolito ETL). Para cada uno: problema, pipeline publicado, resultados, límites y qué puedes copiar. Estado a **noviembre de 2026**.
+
+<Callout type="warning" title="Cómo leer las cifras">
+Todas las cifras de esta página son **auto-reportadas** por la empresa o por el proveedor de la herramienta, y casi todas las de "tiempo ahorrado" son **estimaciones** de los propios ingenieros, no mediciones controladas. Ninguna tiene verificación independiente que hayamos podido encontrar. Cada dato va con quién lo reporta y la fecha; los diagramas son **reconstrucciones** a partir de lo publicado, no esquemas oficiales.
+</Callout>
+
+## Por qué las migraciones funcionan tan bien con agentes
+
+Un agente de migración tiene tres ventajas sobre uno de propósito general:
+
+- **La tarea está bien especificada.** "Pasa este test de Enzyme a RTL manteniendo lo que verifica" o "cambia este campo a `int64` y propaga el tipo" tiene un estado final claro. Spotify lo resume en su guía de prompts: describe el **estado final verificable**, idealmente como tests.
+- **Hay un oráculo barato.** El compilador, el type checker y la suite de tests son jueces deterministas, rápidos y gratuitos comparados con un LLM-as-judge. Permiten reintentar sin humano en el loop.
+- **La unidad es independiente.** Un archivo o un repo se puede migrar, validar y revisar por separado. Eso habilita paralelismo masivo y PRs pequeños.
+
+El patrón de fondo es el *evaluator-optimizer* descrito en [patrones de diseño](/guia/patrones-de-diseno): un generador propone y un evaluador —aquí, determinista— acepta o devuelve el error.
+
+## Airbnb: 3.500 archivos de test en seis semanas
+
+### Contexto y escala
+
+Airbnb había adoptado React Testing Library (RTL) para tests nuevos en 2020, pero le quedaban cerca de **3.500 archivos de tests de componentes** escritos con Enzyme. Borrarlos no era opción: el análisis mostró que abría huecos importantes de cobertura. La estimación para hacerlo a mano era de **1,5 años de ingeniería**.
+
+El post de Charles Covey-Brandt en el blog de ingeniería de Airbnb (marzo de 2025) reporta que la migración completa tomó **seis semanas**: unas 4 horas para el primer barrido masivo, 4 días de ajuste y alrededor de una semana de trabajo manual para la cola final. La idea nació en un hackathon a mediados de 2023 y el pipeline escalable se construyó en 2024 (según la cobertura de InfoQ, marzo de 2025).
+
+### El pipeline
+
+<Diagram id="cmc-airbnb" height={540} />
+
+Lo que Airbnb describe es, en esencia, un **workflow con un LLM dentro**, no un agente autónomo que decide qué hacer:
+
+1. **Máquina de estados por archivo.** Cada archivo recorre los pasos *refactor de Enzyme → arreglar Jest → arreglar lint y `tsc` → completo*. Solo avanza si pasa la validación del paso actual.
+2. **Paralelismo por archivo.** Como cada archivo es independiente, se procesaron cientos a la vez.
+3. **Reintentos con el error como contexto.** Un runner ejecuta cada paso hasta un número configurable de intentos; cada reintento recibe los errores de validación y la última versión del archivo. La mayoría de los archivos terminó en unos 10 intentos; los más difíciles necesitaron entre 50 y 100.
+4. **Contexto amplio.** Al final del proyecto los prompts tenían entre **40.000 y 100.000 tokens**, con hasta 50 archivos relacionados: el componente bajo test, tests hermanos del mismo directorio, imports, ejemplos de RTL, few-shot escritos a mano y guías de migración.
+5. **Estado visible en el propio archivo.** Cada archivo lleva un comentario con el resultado de cada paso (p. ej. cuántos tests de Jest pasan), y una CLI permite re-ejecutar un paso solo sobre las rutas que coinciden con un patrón.
+
+### Decisiones técnicas clave
+
+- **Reintentar antes que perfeccionar el prompt.** Covey-Brandt describe el enfoque central como "fuerza bruta": con validación automática, reintentar muchas veces resultó más rentable que pulir la redacción.
+- **El contexto correcto importa más que el prompt.** El hallazgo más citado del post: elegir los archivos relacionados adecuados mejoró más los resultados que cualquier ajuste de instrucciones. Es [context engineering](/guia/context-engineering) aplicado.
+- **Sample, tune, sweep.** Tras el primer barrido (75 % migrado, unos 900 archivos fallando), el equipo iteró en ciclos: agrupar fallos comunes, tomar 5–10 archivos representativos, ajustar prompts y scripts, validar en la muestra y volver a barrer todo lo pendiente. En 4 días llegaron al **97 %**.
+
+### Resultados y límites
+
+Según Airbnb: 3.500 archivos en seis semanas frente a 1,5 años estimados, conservando cobertura e intención de los tests. Los límites también están en el post: la automatización tocó un **techo** cerca del 97 % y menos de 100 archivos se terminaron a mano, usando la salida fallida del LLM como punto de partida. El artículo no detalla qué modelo se usó ni cómo fue la revisión de código de los PRs, así que no lo afirmamos.
+
+### Qué puedes aplicar
+
+Si tu migración es **archivo a archivo** y tienes tests ejecutables por archivo, es el patrón más barato de replicar: cola, reintentos con el error en el prompt, estado por unidad y re-barrido de lo fallido. No necesitas un framework de agentes; basta un workflow con llamadas al modelo (ver [orquestación avanzada](/guia/orquestacion-avanzada)).
+
+## Google: descubrimiento determinista, LLM acotado, revisión por shards
+
+### Contexto y escala
+
+Google publicó su experiencia en tres piezas: un post de Google Research (julio de 2024), el *experience report* "How is Google using AI for internal code migrations?" (arXiv, enero de 2025) y el paper "Migrating Code At Scale With LLMs At Google" (arXiv, abril de 2025).
+
+El caso emblemático son los **IDs de 32 bits en Google Ads**: identificadores de usuarios, comercios y campañas definidos como `int32` que podían desbordarse. La base de código supera los **500 millones de líneas**, el cambio tocaba "decenas de miles de ubicaciones en miles de archivos" y el esfuerzo manual se estimaba en "cientos de años-ingeniero" (paper de enero de 2025). Según el paper de abril, una migración manual de este tipo tomaba unos dos años.
+
+### El pipeline
+
+<Diagram id="cmc-google" height={540} />
+
+El punto clave es **qué no hace el LLM**:
+
+- **No decide el alcance.** Un experto siembra los campos protobuf y Kythe —el índice de referencias cruzadas de Google— recorre referencias directas e indirectas (hasta distancia 5 en el paper de abril). Regex y revisión humana clasifican cada ubicación como relevante, irrelevante, no migrada o sobrante.
+- **Edita con contexto acotado.** El modelo —un Gemini interno ajustado con código de Google mediante DIDACT, usado solo con prompting para esta tarea y a temperatura 0— recibe el archivo completo y las líneas sugeridas, y devuelve diffs que se aplican con *fuzzy matching*. Hasta tres intentos por archivo.
+- **Pasa por una cadena de validadores**: que haya cambio, que no sea solo whitespace, que el AST sea válido, un *punt* donde el LLM juzga si el cambio era necesario, build y tests. Lo que falla queda para migración manual.
+- **Revisión humana por shards.** Los cambios válidos se agrupan y el sistema de *Large Scale Changes* los envía a los code owners para revisión.
+
+El *experience report* agrega dos detalles: variantes de prompt en paralelo (al estilo pass@k) con **ranking** de candidatos, y un paso de reparación donde el modelo recibe el diff y el error del build.
+
+### Resultados (todos auto-reportados)
+
+| Migración | Escala | Resultado publicado | Fuente |
+|---|---|---|---|
+| IDs `int32` → `int64` (Ads) | decenas de miles de ubicaciones | 80 % de las modificaciones en los cambios aterrizados, escritas totalmente por IA; −50 % de tiempo total estimado | arXiv 2501.06972 (2025-01) |
+| 39 migraciones de IDs | 595 cambios, 93.574 ediciones, 3 devs, 12 meses | 74,45 % de los cambios y 69,46 % de las ediciones generados por LLM; −50 % estimado por los devs | arXiv 2504.09691 (2025-04) |
+| JUnit3 → JUnit4 | 5.359 archivos, más de 149.000 líneas, 3 meses | ~87 % del código generado se commiteó sin cambios | arXiv 2501.06972 |
+| Joda Time → `java.time` | en curso | ~89 % de ahorro estimado en clusters pequeños | arXiv 2501.06972 |
+| Promedio general | — | más del 75 % de los cambios de caracteres generados llegan al monorepo | Google Research (2024-07-18) |
+
+Los propios autores aclaran que no hay comparación controlada, que el 50 % es una **estimación de los desarrolladores** sin mediciones de tiempo de reloj, y que el efecto de largo plazo sobre la calidad del código "está por verse".
+
+### Límites y lecciones que publicaron
+
+- **El prompting puro no alcanza** para migraciones complejas: hizo falta combinar AST, índices de símbolos, heurísticas y LLM.
+- **La planificación agéntica a menudo agregó complejidad sin beneficio**; prompts pequeños y bien definidos fueron más fiables.
+- **La revisión humana es el cuello de botella.** En JUnit tuvieron que limitar el volumen semanal de cambios para no saturar revisores.
+- **Fallos concretos:** no determinismo (reintentar ayudaba, pero frustraba), archivos que no cabían en el contexto, alucinaciones que solo reformateaban o agregaban comentarios, Dart poco soportado, tests rotos preexistentes, y dependencias de Guice que el grafo de llamadas no veía (en Joda Time).
+
+### Qué puedes aplicar
+
+Separa **descubrimiento** (determinista: AST, índice de referencias, `grep` estructurado) de **edición** (LLM). Agrega validadores baratos *antes* del build —diff vacío, solo whitespace, AST inválido, cambios fuera de las líneas objetivo— para descartar intentos sin gastar minutos de CI. Y planifica la capacidad de revisión antes de lanzar miles de PRs.
+
+## Amazon: upgrades de Java, de Q Developer a AWS Transform custom
+
+### Contexto y escala
+
+En agosto de 2024 Andy Jassy, CEO de Amazon, publicó en LinkedIn que la integración de Amazon Q Developer en los sistemas internos para upgrades de Java había llevado el tiempo promedio de subir una aplicación a Java 17 de "50 días-desarrollador" a "unas pocas horas", que en menos de seis meses habían actualizado **más del 50 % de sus sistemas Java de producción**, y que los desarrolladores publicaron el **79 % de las revisiones de código autogeneradas sin cambios adicionales**. Estimó el ahorro en el equivalente a **4.500 años-desarrollador**.
+
+El blog de AWS (1 de agosto de 2024) explica la metodología: "decenas de miles de aplicaciones de producción" migradas de Java 8 u 11 a 17; el ahorro de tiempo se estimó a partir del **número de dependencias migradas** (una dependencia "puede tomar un día o más"), y el ahorro de **US$260 millones anuales** a partir de los **hosts eliminados** gracias a las mejoras de rendimiento de Java 17. AWS las califica de "conservadoras". Son cifras de Amazon sobre su propio producto (la prensa, p. ej. The Decoder, lo señaló como mensaje comercial), y las notas que hablan de "30.000 aplicaciones" no coinciden con la fuente primaria, que dice "decenas de miles".
+
+### Lo que se sabe del pipeline
+
+Amazon no publicó la arquitectura de su campaña interna. Lo que sí está documentado es cómo funcionaba la transformación de Java del producto:
+
+<Steps>
+
+1. **Build local** del proyecto para generar un artefacto con código, dependencias y logs de build.
+2. **Plan de transformación** generado tras compilar en un entorno seguro: nuevas versiones de dependencias, cambios mayores y reemplazos de APIs deprecadas.
+3. **Transformación por pasos en el servidor**; después de cada paso el código vuelve al entorno local para **compilar y ejecutar los tests existentes** (así pueden correr tests que dependen de recursos privados) y los errores alimentan el siguiente intento.
+4. **Resumen y diff** para que el desarrollador acepte o rechace. Las transformaciones **parcialmente exitosas** se terminan a mano.
+
+</Steps>
+
+El upgrade mínimo del JDK es una transformación **separada** del upgrade de librerías: pasos con oráculo propio, como en la máquina de estados de Airbnb.
+
+### La evolución: AWS Transform custom
+
+El **30 de abril de 2026** AWS anunció el fin de soporte de los plugins de IDE de Amazon Q Developer: sin altas nuevas desde el 15 de mayo de 2026 y, el **30 de abril de 2027**, fin de la transformación de código vía plugins (Java y .NET). Para upgrades de Java, AWS recomienda **AWS Transform custom**, en GA desde el 1 de diciembre de 2025.
+
+AWS Transform custom generaliza la idea a cualquier transformación (lenguaje, SDKs, frameworks, librerías) con la CLI `atx`. Según su guía de usuario:
+
+- Cada transformación es una **definición en formato skill**: un `SKILL.md` con instrucciones, más `references/` y `scripts/` opcionales, guardada en un registro por cuenta con borradores y versiones publicadas.
+- El **comando de build o validación** es opcional, pero la documentación lo califica de "muy importante" para la calidad.
+- **Continual learning**: el sistema extrae *lecciones* de las ejecuciones, del feedback y de las correcciones, y las aplica en corridas futuras; un humano las revisa y archiva con `atx custom def learnings`.
+- Flujo recomendado en cuatro fases: definir, piloto en pocos repos, ejecución masiva no interactiva con revisión de desarrolladores, y monitoreo.
+
+AWS reporta (26 de abril de 2026) un cliente anónimo que migró workflows de Control-M a Airflow en 2,5 semanas frente a 12 estimadas: ilustración del proveedor, no evidencia.
+
+### Qué puedes aplicar
+
+Si estás en AWS y tu migración es de las "comunes" (Java, Python, Node.js, SDK de AWS), evalúa AWS Transform custom antes de construir: ya trae el loop de validación, el registro de transformaciones y la ejecución masiva. Si tu migración es propietaria, su modelo de **definición como skill + validación + lecciones revisadas por humanos** es un buen diseño para copiar en tu propio pipeline sobre [AgentCore](/guia/aws-bedrock-agentcore).
+
+## Spotify: Honk, un agente de fondo para toda la flota
+
+### Contexto y escala
+
+Spotify ya tenía **Fleet Management**, que aplica transformaciones a todos sus repos en contenedores y abre PRs automáticamente. Según Spotify, desde mediados de 2024 cerca de **la mitad de sus PRs** los genera este sistema (la cifra mezcla scripts y agentes). El problema: los scripts de transformación crecían sin control; el actualizador de dependencias de Maven superaba las **20.000 líneas**.
+
+En febrero de 2025 empezaron a probar agentes ahí. La serie *Honk* (noviembre de 2025 a abril de 2026) reporta **más de 1.500 PRs fusionados** generados por el agente y un ahorro de **60–90 %** de tiempo frente a escribir el código a mano, ambos según Spotify (noviembre de 2025). Los casos incluyen pasar *value types* de Java a *records*, upgrades de Scio con cambios incompatibles, componentes de UI de Backstage y cambios de configuración YAML/JSON.
+
+### El pipeline
+
+<Diagram id="cmc-spotify" height={540} />
+
+La decisión de arquitectura más importante: **no tocaron la infraestructura existente**. Fleet Management sigue eligiendo repos, abriendo PRs y gestionando revisión y merge; solo el script de transformación se reemplazó por un agente guiado por prompt.
+
+- **Selección del agente.** Probaron Goose y Aider (bien con un prompt, difíciles de escalar a miles de repos), luego un loop propio con 10 turnos por sesión y 3 reintentos (fallaba en cambios en cascada entre archivos), y terminaron en **Claude Code**, al que llaman su agente con mejor desempeño, usado en unas **50 migraciones** (noviembre de 2025). Su CLI interna permite cambiar de agente y de modelo.
+- **Herramientas mínimas.** El agente puede ver el repo, editar archivos y llamar a una herramienta `verify` expuesta por MCP. Git restringido (sin push ni cambio de origin), Bash con allowlist estricta y **sin** búsqueda de código ni documentación: el contexto relevante va condensado en el prompt.
+- **Verificadores independientes.** Se activan según el contenido del repo (p. ej. un verificador de Maven si hay `pom.xml` en la raíz), extraen con regex solo los errores relevantes y se ejecutan todos en el *stop hook* de Claude Code antes de abrir el PR.
+- **LLM-as-judge de alcance.** Compara el diff con el prompt original. Según Spotify (diciembre de 2025), veta cerca de **un cuarto** de las sesiones y el agente logra corregirse más o menos la mitad de las veces; el motivo más común es que el agente se sale de lo pedido (refactoriza de más o desactiva tests inestables). Admiten que todavía no tienen evals para el juez.
+- **Sandbox.** Contenedor con permisos limitados, pocos binarios y casi sin acceso a otros sistemas; el push ocurre fuera del agente.
+
+### Límites y fallos que publicaron
+
+Spotify distingue tres fallos: no se produce PR (molestia menor), el PR falla en CI y, el peor, **el PR pasa CI pero es incorrecto**, típicamente por baja cobertura de tests o cambios fuera de alcance.
+
+La parte 4 (abril de 2026) es la más honesta. Para deprecar dos datasets con cerca de **1.800 pipelines directos aguas abajo**, generaron **240 PRs** automatizados y estiman un ahorro de unas 10 semanas-ingeniero. Pero:
+
+- Abandonaron las migraciones de **Scio**: la variabilidad entre equipos hacía imposible un prompt completo.
+- Los repos de BigQuery Runner y dbt casi no tenían tests en build, así que **no hubo loop de verificación** y los equipos dueños tuvieron que probar a mano.
+- El archivo de contexto adaptado de la guía humana no bastó: el agente asumió mapeos de campos incorrectos hasta que se los dieron **explícitos en tablas**.
+- Los campos que requerían juicio de negocio se dejaron sin cambiar, con un comentario que enlaza a la guía humana.
+
+### Qué puedes aplicar
+
+Si ya tienes infraestructura de cambios masivos (Renovate, scripts de flota, un bot de PRs), **inserta el agente donde hoy está el script** y conserva el resto. Dale el mínimo de herramientas, oculta los detalles del build detrás de una herramienta `verify` y agrega un juez de alcance después de los verificadores deterministas. Y acepta la lección de la parte 4: **sin tests, no hay oráculo**, y el agente pasa a ser un generador de borradores.
+
+## Nubank con Devin: el caso del proveedor
+
+Nubank aparece en un caso de cliente publicado por Cognition, el creador de Devin (sin fecha visible en la página; describe un proyecto de 2023–2024). El problema: partir un **monolito ETL de 8 años y más de 6 millones de líneas** en submódulos, con unas **100.000 implementaciones de clases de datos**, más de 1.000 ingenieros involucrados, un plazo esperado de 18 meses y cadenas de dependencias de hasta 70 niveles.
+
+Lo interesante del enfoque, según la página: usaron migraciones manuales previas como datos, parte para **fine-tuning** y parte como **set de evaluación** (la tasa de completitud se duplicó y una sub-tarea bajó de unos 40 a unos 10 minutos); Devin escribió **sus propios scripts** para pasos repetitivos (p. ej. inferir el país `br`, `co` o `mx` desde la ruta del archivo); y los ingenieros gestionaron el proyecto, revisaron y fusionaron los PRs.
+
+<Callout type="warning" title="Cifras inconsistentes en la fuente">
+La misma página de Cognition reporta "8x" de eficiencia en el titular, "12x" en el resumen y "8–12x" en resultados, además de "más de 20x" de ahorro de costo sobre el alcance delegado (costo de Devin frente al costo por hora de un ingeniero). No encontramos un post técnico de Nubank ni verificación independiente. Úsalo como ejemplo de patrón (fine-tuning con ejemplos propios + set de evaluación + humano que aprueba), no como benchmark.
+</Callout>
+
+## Comparativa
+
+| | Airbnb | Google | Amazon | Spotify | Nubank |
+|---|---|---|---|---|---|
+| Migración | Enzyme → RTL | IDs `int32`→`int64`, JUnit, Joda Time | Java 8/11 → 17 | Cambios de flota variados | Partir monolito ETL |
+| Unidad de trabajo | Archivo de test | Archivo / cluster de archivos | Aplicación | Repo | Clase de datos / sub-tarea |
+| Alcance decidido por | Inventario de archivos | Kythe + regex + humano | Plan de transformación | Fleet Management (targeting) | Humanos que gestionan el proyecto |
+| Oráculo | Jest, ESLint, `tsc` | AST, punt, build, tests | Build y tests existentes | Verificadores + LLM-as-judge | Revisión humana (no detallado) |
+| Reintentos | Hasta 50–100 en la cola larga | Hasta 3 por archivo | Iterativo por paso | 10 turnos y 3 reintentos (loop propio); Claude Code después | No detallado |
+| Humano | Último ~3 % a mano | Shards a code owners | Acepta el diff | Equipo dueño revisa el PR | Revisa y fusiona |
+| Cifra principal (auto-reportada) | 6 semanas vs. 1,5 años (2025-03) | 74,45 % de cambios por LLM; −50 % estimado (2025-04) | 4.500 años-dev; 79 % sin cambios (2024-08) | 1.500+ PRs; 60–90 % ahorro (2025-11) | 8–12x eficiencia (sin fecha) |
+| Tipo de fuente | Blog de ingeniería | Papers + blog de research | Post del CEO + blog de producto | Serie de blog de ingeniería | Caso del proveedor |
+
+<Callout type="info" title="¿Y ADK, Bedrock o AgentCore?">
+A noviembre de 2026 no encontramos un caso público de migración masiva construido sobre **Google ADK** o **AgentCore** con detalle técnico comparable. El más cercano al stack de esta guía es **AWS Transform custom** (servicio administrado de AWS). Lo que sí puedes hacer es llevar los patrones de estos casos a tu propio stack, como se muestra más abajo; eso es una propuesta, no un caso documentado.
+</Callout>
+
+## Patrones comunes
+
+Leídos en conjunto, los cinco casos convergen en un puñado de decisiones:
+
+1. **Verificación determinista como oráculo.** Compilador, type checker, tests, linter y, en Google, validación de AST. El LLM-as-judge aparece solo como capa *adicional* (Spotify) para algo que el compilador no ve: el alcance del cambio.
+2. **Fan-out por unidad independiente.** Archivo (Airbnb, Google), aplicación (Amazon), repo (Spotify). El paralelismo lo da la cola o la infraestructura de flota, no un agente supervisor. Google incluso reporta que la planificación agéntica agregaba complejidad sin beneficio.
+3. **Alcance fuera del LLM.** Qué tocar lo decide un índice de referencias, un inventario o un sistema de targeting. El modelo edita; no elige.
+4. **Reintento con el error en el contexto**, con tope. Más allá del tope, la unidad pasa a manual: ningún caso llegó al 100 % automático.
+5. **El contexto pesa más que el prompt.** Archivos relacionados correctos (Airbnb), ejemplos de código concretos y estado final verificable (Spotify), tablas de mapeo explícitas (Spotify, parte 4), ejemplos de migraciones previas (Nubank).
+6. **Humano en el PR, y la revisión es el cuello de botella.** Google limitó el volumen semanal de cambios para no saturar a los revisores, y en todos los casos el merge final es humano. Planifica la capacidad de revisión como parte del proyecto.
+7. **Iteración por muestras.** *Sample, tune, sweep* (Airbnb), piloto antes de ejecución masiva (AWS Transform), feedback del agente sobre el prompt (Spotify). Guarda las muestras como set de evaluación para comparar prompts y modelos.
+8. **Herramientas mínimas y sandbox.** Sin push, sin red general, Bash con allowlist. Menos herramientas significa menos contexto y menos fallos impredecibles.
+
+En generación de tests el patrón es el mismo. El paper de Meta sobre **TestGen-LLM** (febrero de 2024) filtra cada test generado con tres oráculos en orden —compila, pasa de forma fiable, aumenta cobertura— antes de mostrárselo a un ingeniero: 75 % compilaron, 57 % pasaron de forma fiable, 25 % aumentaron cobertura, y los ingenieros aceptaron el 73 % de las recomendaciones (cifras de Meta).
+
+## Cómo llevarlo a tu stack
+
+Este es un **diseño propuesto** que aplica los patrones anteriores a la arquitectura de referencia de la guía ([ADK + gateway + Bedrock](/guia/arquitectura-adk-gateway-bedrock)):
+
+<Diagram id="cmc-referencia" height={540} />
+
+El núcleo de cualquier variante es el loop *generar → validar → reintentar con el error*. Este fragmento es **ilustrativo**: muestra el patrón archivo a archivo al estilo Airbnb, llamando al modelo a través de un AI gateway compatible con LiteLLM. En producción lo envolverías en un workflow durable y en un sandbox.
+
+```python title="migrar_unidad.py (ilustrativo)"
+import os, subprocess, pathlib
+import litellm
+
+MAX_INTENTOS = 6
+# Oráculo determinista: el orden importa (lo barato primero).
+VALIDACION = [["npx", "eslint", "{f}"], ["npx", "tsc", "--noEmit", "-p", "."], ["npx", "jest", "{f}"]]
+
+def validar(archivo: str) -> str | None:
+    """Devuelve el primer error (recortado) o None si todo pasa."""
+    for plantilla in VALIDACION:
+        cmd = [p.replace("{f}", archivo) for p in plantilla]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        if r.returncode != 0:
+            return (r.stdout + r.stderr)[-4000:]   # la cola del log suele tener el error útil
+    return None
+
+def migrar(archivo: str, instrucciones: str, contexto: str) -> str:
+    ruta, error = pathlib.Path(archivo), None
+    for intento in range(1, MAX_INTENTOS + 1):
+        prompt = f"{instrucciones}\n\n## Contexto\n{contexto}\n\n## Archivo\n{ruta.read_text()}"
+        if error:
+            prompt += f"\n\n## Falló la validación (intento {intento - 1})\n{error}"
+        r = litellm.completion(
+            model="litellm_proxy/claude-sonnet",            # alias definido en tu AI gateway
+            api_base=os.environ["AI_GATEWAY_URL"], api_key=os.environ["AI_GATEWAY_KEY"],
+            temperature=0,
+            messages=[{"role": "system", "content": "Devuelve solo el archivo completo migrado."},
+                      {"role": "user", "content": prompt}],
+        )
+        ruta.write_text(r.choices[0].message.content)
+        error = validar(archivo)
+        if error is None:
+            return "validado"        # pasa a la cola de PRs
+    return "manual"                  # la última versión queda como borrador para una persona
+```
+
+Si en vez de un loop fijo quieres un **agente** que explore el repo y haga cambios en varios archivos (el caso de Spotify), el diseño cambia poco: el agente de ADK recibe herramientas `leer_archivo`, `escribir_archivo` y `verificar` (que ejecuta el oráculo en un sandbox y devuelve errores resumidos), y la regla "no abrir PR si `verificar` falla" se aplica **en código**, fuera del modelo. Algunas decisiones que conviene tomar desde el inicio:
+
+| Decisión | Opción simple | Opción avanzada | Cuándo pasar a la avanzada |
+|---|---|---|---|
+| Unidad | Archivo | Repo o cluster por dependencias | Cambios en cascada entre archivos (Google con Joda Time, Spotify) |
+| Ejecutor | Workflow con LLM (loop fijo) | Agente con herramientas | Cuando el cambio requiere explorar o tocar varios archivos |
+| Oráculo | Build + tests | + diff de AST + LLM-as-judge de alcance | Cuando aparecen PRs que pasan CI pero se salen de lo pedido |
+| Orquestación | Cola + workers | Workflow durable (Step Functions, Temporal) | Campañas de días con reintentos y pausas para revisión |
+
+La orquestación durable y el manejo de reintentos están en [orquestación avanzada](/guia/orquestacion-avanzada); las métricas por unidad (intentos, tokens, causa de fallo) y los sets de evaluación de prompts, en [evaluación y observabilidad](/guia/evaluacion-observabilidad); el aislamiento del sandbox y el mínimo privilegio, en [seguridad y gobernanza](/guia/seguridad-gobernanza).
+
+## Errores comunes
+
+<Callout type="danger" title="Migrar sin oráculo">
+Si el código no tiene tests que se ejecuten en build, el agente no puede verificar nada y solo produce borradores. Spotify lo vivió con los repos de dbt y BigQuery Runner. Antes de lanzar la campaña, mide la cobertura de las unidades a migrar y decide qué hacer con las que no la tienen: agregar tests primero, migrarlas aparte con revisión reforzada o dejarlas para el final.
+</Callout>
+
+<Callout type="warning" title="Inundar a los revisores">
+Generar 1.000 PRs en un día es fácil; revisarlos no. Google limitó el volumen semanal en JUnit porque la capacidad de revisión era el cuello de botella. Dosifica por equipo, agrupa cambios triviales y etiqueta los PRs de la campaña para que se puedan filtrar.
+</Callout>
+
+<KeyPoints title="En resumen">
+
+- Las migraciones son el caso de agentes con mejor retorno publicado porque combinan **unidades independientes**, un **oráculo automático** y **revisión en el PR**.
+- Airbnb migró ~3.500 archivos de test en 6 semanas frente a 1,5 años estimados; Google reporta 74,45 % de cambios generados por LLM en 39 migraciones; Amazon, 4.500 años-desarrollador ahorrados; Spotify, más de 1.500 PRs fusionados. **Todo auto-reportado y en su mayoría estimado.**
+- En ningún caso el LLM decide el alcance: lo deciden un inventario, un índice de referencias o la infraestructura de flota.
+- El patrón técnico es *generar → validar → reintentar con el error*, con tope de intentos y salida a manual. Ningún caso llegó al 100 % automático.
+- La **revisión humana** es el cuello de botella: dosifica el volumen de PRs desde el diseño.
+- En AWS, Q Developer deja la transformación vía IDE el 30 de abril de 2027 y su sucesor es **AWS Transform custom**; para migraciones propietarias, replica sus patrones sobre ADK, un AI gateway y Bedrock.
+
+</KeyPoints>
+
+## Siguientes pasos
+
+<Cards cols={3}>
+  <Card title="Casos reales" tag="sección" href="/guia/casos-reales">Panorama de la sección y criterios para leer casos de empresas con cifras auto-reportadas.</Card>
+  <Card title="Plataformas internas de agentes" tag="caso" href="/guia/caso-plataformas-internas">Cómo las empresas grandes construyen la plataforma sobre la que corren agentes como estos.</Card>
+  <Card title="Patrones de diseño" href="/guia/patrones-de-diseno">Workflow vs. agente, evaluator-optimizer y cuándo no hace falta un agente.</Card>
+  <Card title="Orquestación avanzada" href="/guia/orquestacion-avanzada">Ejecución durable, reintentos, colas y humano en el loop para campañas largas.</Card>
+  <Card title="Evaluación y observabilidad" href="/guia/evaluacion-observabilidad">Sets de evaluación, LLM-as-judge calibrado y trazas por unidad de trabajo.</Card>
+  <Card title="AWS Bedrock AgentCore" href="/guia/aws-bedrock-agentcore">Runtime, Gateway e identidad para correr tus propios agentes de migración en AWS.</Card>
+</Cards>

@@ -1,0 +1,237 @@
+Cuando un solo equipo construye un agente, el problema es el agente. Cuando lo hacen doscientos, el problema pasa a ser la **plataforma**: por dónde pasan las llamadas a modelos, cómo se descubren y autorizan las herramientas, quién es dueño de qué, cómo se mide el costo y cómo se evita que cada equipo reinvente (mal) la autenticación OAuth. Esta página analiza cinco empresas que publicaron con detalle cómo resolvieron esa capa: **Uber**, **Block**, **Cloudflare**, **Deutsche Telekom** y **LinkedIn**. Al final destilamos un blueprint aplicable a un stack ADK + AI gateway + Bedrock.
+
+<Callout type="warning" title="Cómo leer las cifras">
+Todas las cifras son **auto-reportadas** por las propias empresas (en blogs de ingeniería, charlas o casos de proveedores) y llevan su fecha. Ninguna está auditada por terceros. Cloudflare, además, vende los productos que describe. Los diagramas son **reconstrucciones** a partir del texto publicado, no diagramas oficiales. Datos al 1 de noviembre de 2026.
+</Callout>
+
+Los productos concretos que corren sobre estas plataformas se tratan en otras páginas de la sección: Hiring Assistant de LinkedIn en [investigación multiagente](/guia/caso-investigacion-multiagente) y QueryGPT/Genie de Uber en [datos y analítica](/guia/caso-datos-analitica). Aquí nos quedamos con la infraestructura compartida.
+
+## Por qué aparece una plataforma
+
+Los cinco casos cuentan casi la misma historia de origen:
+
+1. **Integraciones fragmentadas.** Uber describe equipos que llamaban a cada proveedor de LLM a su manera (2024) y, dos años después, cientos de integraciones MCP ad hoc con infraestructura duplicada y herramientas imposibles de encontrar (2026).
+2. **Secretos y datos en lugares incorrectos.** Cloudflare se propuso que ninguna clave de proveedor viviera en un laptop; Uber puso redacción de PII antes de enviar nada a proveedores externos.
+3. **Escala geográfica o funcional.** Deutsche Telekom necesitaba agentes en unos diez países europeos, en chat y voz; Block quería llegar a todas las funciones de la empresa, no solo a ingeniería.
+4. **Ciclo de vida.** Telekom concluyó que un agente no se libera como un microservicio: comparte memoria de conversación, itera más rápido y su prompt es frágil.
+
+La respuesta, en todos los casos, fue **centralizar los caminos** (hacia modelos, hacia herramientas, hacia identidad) y **descentralizar la construcción** de agentes.
+
+## Uber: del GenAI Gateway al MCP Gateway
+
+### Contexto y escala
+
+Uber es el caso con la evolución pública más larga. En **julio de 2024** su equipo de Michelangelo (la plataforma de ML de la empresa) publicó el diseño del **GenAI Gateway**: un servicio en Go que envuelve a los proveedores externos (OpenAI, Vertex AI) y al stack propio de serving de modelos abiertos. Entonces lo usaban **cerca de 30 equipos**, con **16 millones de consultas al mes** y un pico de **25 QPS**, y la empresa había identificado más de 60 casos de uso de LLM (auto-reportado, julio de 2024).
+
+En **octubre de 2026** Uber publicó la siguiente capa: el **MCP Gateway**, que según la empresa aloja **más de 800 servidores MCP y más de 5.000 herramientas** usadas por "cientos de equipos". El post no da volumen de llamadas ni número de agentes. Una charla resumida por The Pragmatic Engineer en **marzo de 2026** añade contexto de adopción en ingeniería: unas 3.000 personas en el área técnica, 84 % de desarrolladores usando agentes de código (la misma fuente cita 92 % de uso mensual en otra sección, una inconsistencia), 11 % de los PR abiertos por agentes y un costo de IA **6 veces mayor** que en 2024.
+
+### Arquitectura
+
+<Diagram id="cpi-uber-mcp" height={560} />
+
+Las capas que Uber describe públicamente:
+
+- **Gateway de modelos.** El GenAI Gateway imita la API HTTP/JSON de OpenAI (decisión explícita para no crear una API propia que envejezca), autentica, redacta PII antes de los proveedores externos y la restaura en la respuesta, emite métricas y logs de auditoría para atribuir costo, revisar seguridad y evaluar calidad, y centraliza presupuestos.
+- **Registro de herramientas (control plane).** El **MCP Registry** es la fuente de verdad: qué servidores y tools existen, quién es dueño y qué está habilitado.
+- **Proxy (data plane).** Traduce cada llamada MCP a HTTP, gRPC o TChannel, la ejecuta a través del sidecar de la malla de servicios y refresca su configuración en memoria sin reinicios.
+- **Descubrimiento automático.** Un crawler sobre Cadence lee el registro de IDL (Protobuf/Thrift), crea un servidor MCP virtual por servicio y usa un LLM para redactar descripciones de herramientas. **Todo nace deshabilitado**: el equipo dueño revisa, habilita y aprueba cada cambio de descripción como un diff con rollback.
+- **Identidad y permisos.** Autorización a nivel de tool con el sistema de control de acceso interno (política por servidor y override por tool), donde el llamador puede ser una persona, un servicio o un agente. Para terceros como Jira, se reenvía el token del usuario y se intercambia por una credencial externa.
+- **Construcción de agentes.** Según la charla de marzo de 2026: **Uber Agent Builder** (no-code, con acceso a MCP y datasets y handoff entre agentes), **Agent Studio** para trazar, versionar y evaluar flujos multiagente, un **registro de agentes**, la CLI **`aifx`** que aprovisiona Claude Code, Codex o Cursor con los servidores MCP correctos, y **Minion** para agentes en segundo plano con acceso al monorepo.
+
+### Decisiones técnicas
+
+- **Build sobre lo existente.** La idea central del post de 2026: la vía más rápida para darle herramientas a un agente es exponer las APIs que ya existen, no reescribir servicios. La IDL ya describía miles de servicios.
+- **Contra la saturación de contexto.** Con cientos de servidores, cargar todos los esquemas es inviable. Uber agregó un proxy de descubrimiento incremental ("Omni MCP", con operaciones para descubrir servidores, descubrir tools, pedir el esquema e invocar), **proyección de respuestas** (el modelo pide solo los campos que necesita) y **Code Mode** a través de `aifx`, que es el modo por defecto para agentes de código.
+
+### Problemas y límites
+
+La redacción de PII agrega latencia y puede degradar la calidad de la respuesta, y los placeholders pueden ser inconsistentes según la posición de la entidad (2024). El costo ×6 se reporta como problema principal. El propio post de 2026 concluye que lo difícil no es la IA sino el "tejido conectivo": descubrimiento, seguridad y confiabilidad.
+
+### Qué puedes aplicar
+
+Si tienes un catálogo de APIs con OpenAPI o IDL, el patrón de Uber se traduce directo a [AgentCore Gateway](/guia/aws-bedrock-agentcore) (targets OpenAPI y Lambda) con una regla de oro: **descubrir no es exponer**. Registra todo deshabilitado y exige que el equipo dueño habilite y revise la descripción. Y pon el [AI gateway](/guia/gateways) antes que los agentes: Uber lo tenía dos años antes de su MCP Gateway.
+
+## Block: un agente para toda la empresa
+
+### Contexto y escala
+
+Block (Square, Cash App, Afterpay) tomó un camino distinto: en lugar de una plataforma para que equipos construyan agentes, distribuyó **un agente de propósito general**, **goose**, a todos los empleados, y concentró el trabajo de plataforma en los **servidores MCP**. En **abril de 2025** su equipo de DevRel reportaba que "miles" de empleados lo usaban a diario y que muchos declaraban ahorrar entre 50 % y 75 % del tiempo en tareas comunes. En **junio de 2025** su blog de ingeniería hablaba de **más de 60 servidores MCP** construidos. Una charla de Angie Jones (VP de Ingeniería) resumida en **diciembre de 2025** habla de **12.000 empleados en 15 funciones** alcanzados en unos dos meses y más de 100 servidores MCP internos (fuente secundaria).
+
+Contexto necesario: en **febrero de 2026** Block anunció el recorte de unos **4.000 puestos**, casi la mitad de la plantilla, y su dirección atribuyó parte de la decisión a la productividad lograda con IA (Fortune, marzo de 2026). La cifra de 12.000 empleados es anterior a ese recorte.
+
+### Arquitectura
+
+<Diagram ids={["cpi-block-goose", "cpi-cloudflare"]} height={560} />
+
+- **Distribución como plataforma.** goose llega preinstalado y se actualiza solo desde el centro de software interno, con modelos ya configurados y acceso por defecto a un set curado de servidores MCP aprobados.
+- **Gateway de modelos.** En 2025 Block accedía a modelos de Anthropic y OpenAI mediante endpoints corporativos alojados en Databricks, con acuerdos de uso de datos con los proveedores.
+- **Herramientas.** Servidores MCP escritos por ingenieros de Block para Snowflake, GitHub, Jira, Slack, Google Drive y APIs internas (chequeos de compliance, triage de soporte).
+- **Identidad.** OAuth al primer uso, scopes mínimos y tokens en el keychain del sistema operativo. En abril de 2025 el flujo OAuth corría dentro de servidores MCP locales, algo que Block calificó de solución temporal.
+- **Gobierno.** Los administradores pueden definir qué modelos invocan qué tools; las tools se anotan como de solo lectura o destructivas (estas últimas piden confirmación); algunos servidores aplican allowlists de modelos; goose está restringido para ciertas categorías de datos sensibles.
+
+### Decisiones técnicas
+
+- **Open source y estándar.** goose nació open source y en **diciembre de 2025** Block lo donó a la **Agentic AI Foundation** de la Linux Foundation, junto con MCP (Anthropic) y AGENTS.md (OpenAI). Apostar por MCP permitió que el mismo servidor sirviera a goose y a otros clientes.
+- **Diseño de servidores MCP.** El playbook de Block (junio de 2025) es una de las mejores guías públicas: diseñar desde el **workflow** y no desde el endpoint (su servidor de Linear pasó de más de 30 tools espejo de la API a 2), tratar nombres y descripciones como prompt, controlar el tamaño de la salida en tokens, mantener **un solo nivel de riesgo por tool** y no inyectar datos dinámicos que rompan el prompt caching.
+
+### Resultados, problemas y límites
+
+Las cifras de ahorro de tiempo son auto-reportes de empleados. Un agente local en cada laptop simplifica la distribución pero complica el control central: credenciales en máquinas de usuarios, servidores MCP locales y menos visibilidad que un gateway de red. Block lo mitigó con revisión de servidores, allowlists y anotaciones de riesgo, no con un proxy único.
+
+### Qué puedes aplicar
+
+Si tu prioridad es adopción transversal (finanzas, operaciones, legal), un cliente agéntico curado con servidores MCP aprobados puede generar más valor que esperar a que cada área construya su agente. Aplica el playbook de diseño al construir tus servidores ([MCP](/guia/mcp)) y define desde el día uno la anotación de riesgo por tool y la política de aprobación ([seguridad y gobernanza](/guia/seguridad-gobernanza)).
+
+## Cloudflare: el stack interno sobre su propia plataforma
+
+### Contexto y escala
+
+En **abril de 2026** Cloudflare publicó el stack que construyó en once meses para su organización de ingeniería, impulsado por un equipo táctico llamado iMARS (Internal MCP Agent/Server Rollout Squad). Las cifras de los 30 días previos a la publicación (auto-reportadas): **3.683 usuarios activos** (60 % de unos 6.100 empleados, 93 % de R&D), **295 equipos** con actividad de IA, **20,18 millones de solicitudes** y **241.370 millones de tokens** por AI Gateway, **13 servidores MCP con más de 182 tools**. El reparto de tráfico: 91 % a laboratorios frontera y 9 % a modelos abiertos en Workers AI. Cloudflare reporta además que el promedio semanal de merge requests pasó de unos 5.600 a más de 8.700.
+
+El sesgo es evidente y conviene declararlo: Cloudflare vende AI Gateway, Access y los portales MCP. Aun así, el post es inusualmente concreto en cifras y decisiones.
+
+### Arquitectura
+
+La segunda pestaña del diagrama anterior muestra el recorrido. Tres capas:
+
+- **Plataforma.** **Access** (Zero Trust) autentica todo. Un **único proxy Worker** valida el JWT, inyecta las claves de proveedor del lado servidor y envía al **AI Gateway** solo un UUID anónimo para atribuir costo por usuario. Un endpoint de descubrimiento configura el cliente de código (OpenCode) con un solo comando de login. Un **portal MCP** agrupa los servidores tras un solo OAuth.
+- **Conocimiento.** **Backstage** como catálogo de servicios y equipos, y **AGENTS.md** generado automáticamente en unos 3.900 repositorios, siempre vía merge request revisado por el equipo dueño.
+- **Enforcement.** Un **revisor de código con IA** en el pipeline de CI: un coordinador clasifica cada MR por riesgo y delega en revisores especializados (seguridad, calidad, documentación, rendimiento).
+
+### Decisiones técnicas
+
+- **Proxy único desde el día uno.** Cloudflare lo destaca como la mejor decisión: dio un punto de control para atribución, cambios de modelo y permisos sin tocar la configuración de cada cliente.
+- **Code Mode contra el costo de los esquemas.** Las 34 tools del servidor de GitLab consumían unos 15.000 tokens por solicitud (alrededor de 7,5 % de una ventana de 200 mil). El portal colapsa las definiciones en dos tools.
+- **Modelos abiertos donde el costo manda.** Un agente de seguridad que procesa más de 7.000 millones de tokens por día corre en un modelo abierto en Workers AI, con un ahorro estimado por la empresa de 77 % frente a un modelo propietario de gama media.
+- **Gobierno de MCP.** En su arquitectura de referencia (abril de 2026) Cloudflare suma logs centralizados, DLP en los portales y reglas para detectar **"shadow MCP"**: servidores remotos no autorizados que los empleados conectan por su cuenta.
+
+### Problemas y límites
+
+Las primeras salidas de los agentes eran plausibles pero incorrectas para cada repo porque les faltaba contexto local (cómo compilar, qué no tocar). Los AGENTS.md generados fallaban en repos políglotas y uno desactualizado resultó peor que no tenerlo; el revisor automático ahora señala cuándo hay que actualizarlo.
+
+### Qué puedes aplicar
+
+El patrón **identidad → proxy → AI gateway** es directamente trasladable a tu stack: IdP corporativo delante, [LiteLLM Proxy](/guia/arquitectura-adk-gateway-bedrock) con claves virtuales como único camino a Bedrock, y ningún agente ni laptop con credenciales de proveedor. Y trata el contexto del repositorio (AGENTS.md, catálogo de servicios) como parte de la plataforma, no como responsabilidad de cada desarrollador.
+
+## Deutsche Telekom: LMOS, agentes como recursos de Kubernetes
+
+### Contexto y escala
+
+Deutsche Telekom construyó **LMOS** (Language Models Operating System) para **Frag Magenta**, su programa de automatización de ventas y servicio al cliente, con el desafío de desplegar agentes en unos diez países europeos, en chat y voz y en varios idiomas. Según los responsables del proyecto (InfoQ, **febrero de 2025**): más de **1 millón de preguntas** respondidas con 89 % de respuestas aceptables, más de **300.000 conversaciones** desviadas de agentes humanos con una tasa de riesgo menor al 2 %, y un tiempo de desarrollo de agentes de dominio que bajó de **2 meses a 10 días**. Un caso de Qdrant de **marzo de 2025** habla de más de 2 millones de conversaciones (las dos fuentes miden cosas distintas y no coinciden del todo).
+
+La línea de tiempo explica la decisión de construir: un bot de FAQ en LangChain (septiembre de 2023), un framework propio en Kotlin semanas después, el primer agente con tool calling para facturación (febrero de 2024) y una iniciativa interna que redujo el desarrollo de un agente a 12 días (julio de 2024).
+
+### Arquitectura
+
+<Diagram ids={["cpi-telekom-lmos", "cpi-linkedin"]} height={560} />
+
+- **Agentes por dominio.** Un chatbot de cara al cliente, un router y agentes aislados como microservicios, cada uno responsable de un dominio (facturación, contratos). El RAG vive en una **Search API** compartida, fuera de los agentes.
+- **ARC.** Un DSL en Kotlin para escribir agentes con poco código, apoyado en la inversión previa de Telekom en la JVM.
+- **Control plane sobre Kubernetes.** La plataforma corre sobre Kubernetes e Istio. Según la documentación de Eclipse LMOS, el **LMOS Operator** define los recursos `Agent`, `Channel` y `ChannelRouting`: cada agente publica capacidades versionadas; un `Channel` declara qué capacidades necesita; si alguna no se resuelve, el channel no se activa; el **router** usa el resultado para enviar cada consulta al agente adecuado.
+- **Registro.** Los metadatos de cada agente siguen el formato Thing Description del W3C Web of Things.
+- **Interoperabilidad.** Agentes en Python, LangChain o LlamaIndex pueden desplegarse si cumplen las especificaciones de la plataforma.
+
+### Decisiones técnicas
+
+Telekom **construyó** porque en 2023 no había frameworks de agentes para la JVM y quería reutilizar a sus desarrolladores y su operación de Kubernetes. Luego **abrió** el proyecto: LMOS es hoy un proyecto de la Eclipse Foundation, que en **octubre de 2025** presentó además **ADL** (Agent Definition Language), un lenguaje y toolkit visual para que negocio e ingeniería definan el comportamiento de los agentes de forma versionable, separado de los prompts. La cobertura de ese lanzamiento describía LMOS como en estado alpha.
+
+### Problemas y límites
+
+Los autores son francos: los prompts son frágiles (de ahí el aislamiento por dominio para limitar el radio de impacto), hay que diseñar para el fallo (rollback y corrección en horas importan más que liberar rápido) y el ritmo de releases quedó limitado a **unos dos agentes por semana** por los requisitos de seguridad y pruebas. Construir una plataforma propia también implica mantenerla: es una apuesta que pocas empresas pueden sostener.
+
+### Qué puedes aplicar
+
+Aunque no adoptes LMOS, su modelo de **capacidades versionadas** y canales que solo se activan si todas sus dependencias resuelven es una buena idea para tu [registro de agentes](/guia/a2a): las Agent Cards de A2A describen capacidades, pero la resolución de versiones y el rollout por canal los tienes que diseñar tú.
+
+## LinkedIn: la mensajería como orquestador
+
+### Contexto
+
+En **septiembre de 2025** LinkedIn publicó cómo extendió su stack de IA generativa para construir agentes, empezando por Hiring Assistant. No publicó número de agentes ni de equipos, pero sí decisiones de arquitectura poco comunes.
+
+### Arquitectura
+
+La segunda pestaña del diagrama anterior lo resume:
+
+- **Mensajería como orquestación.** En vez de un orquestador nuevo, LinkedIn reutilizó su sistema de mensajería, que ya resolvía orden FIFO, historial, reintentos persistentes y entrega eventual. Un **agent lifecycle service** traduce entre mensajes y llamadas gRPC, así los desarrolladores no tocan la mensajería. Más tarde se agregó un modo **síncrono** para experiencias interactivas.
+- **Agentes como servicios gRPC.** Se definen con esquemas proto3 anotados con opciones de la plataforma y se registran con un plugin de build.
+- **Skill registry.** Registro de agentes y skills con su metadata e invocación; LinkedIn declaró que migraba de este registro propietario hacia **MCP y A2A** de forma incremental.
+- **Memoria.** Experiencial (hechos, preferencias) y conversacional, separadas por diseño.
+- **Observabilidad y evaluación.** LangSmith en pre-producción, OpenTelemetry en producción, y las trazas alimentan evaluaciones offline y pruebas de regresión. LangGraph y LangChain se adaptaron con providers propios para usar la mensajería y la memoria internas.
+- **Human-in-the-loop** como primitiva de la plataforma, no como responsabilidad de cada agente.
+
+Un resumen de un podcast de InfoQ de 2026 agrega que LinkedIn opera agentes de código en segundo plano en sandboxes remotos, cada uno con **identidad propia y permisos restringidos**, que solo proponen cambios vía pull request (fuente secundaria, sin cifras verificables).
+
+### Qué puedes aplicar
+
+Antes de comprar o construir un orquestador, mira qué sistemas tuyos ya garantizan orden, persistencia y reintentos (colas, event bus, un workflow engine). LinkedIn y Uber (con Cadence en su crawler) reutilizaron infraestructura probada. Y adopta OpenTelemetry desde el principio: es lo que permite cambiar de framework sin perder trazas ([evaluación y observabilidad](/guia/evaluacion-observabilidad)).
+
+## Tabla comparativa
+
+| | Uber | Block | Cloudflare | Deutsche Telekom | LinkedIn |
+|---|---|---|---|---|---|
+| Enfoque | Plataforma para que equipos construyan agentes y tools | Un agente general para todos + MCP curados | Stack de ingeniería sobre productos propios | Plataforma multiagente de cara al cliente | Plataforma de agentes de producto |
+| Cifra principal (auto-reportada) | 800+ servidores MCP, 5.000+ tools (oct-2026) | 12.000 empleados, 15 funciones (dic-2025, previo al recorte) | 3.683 usuarios activos, 20,18 M requests/30 días (abr-2026) | 1 M+ preguntas, 300.000+ conversaciones desviadas (feb-2025) | No publicada |
+| Gateway de modelos | GenAI Gateway propio (Go, API estilo OpenAI) | Endpoints corporativos en Databricks | Proxy Worker + AI Gateway | No detallado | No detallado |
+| Herramientas | MCP Gateway: registro + proxy, IDL → tools | Servidores MCP internos curados | Portal MCP + Code Mode | Search API + tools por agente | Skill registry → MCP/A2A |
+| Identidad | Control de acceso por tool; token de usuario a terceros | OAuth por usuario, keychain | Access (Zero Trust), UUID anónimo | No detallado | Identidad por agente (agentes de código, 2026) |
+| Runtime | Agent Builder, Minion, clientes vía `aifx` | Laptop del empleado | Clientes + Workers, Sandbox SDK | Kubernetes + Istio, CRDs | Servicios gRPC |
+| Observabilidad / evals | Auditoría y métricas en gateway; Agent Studio | No detallado | Costo por usuario en AI Gateway; revisor en CI | Rollout/rollback, A/B | OTel + LangSmith + evals offline |
+| Open source / estándares | MCP | goose (AAIF), MCP | MCP, AGENTS.md | Eclipse LMOS, ADL, W3C WoT | LangGraph, MCP/A2A |
+| Límite reconocido | Costo ×6; saturación de contexto | Control descentralizado | Contexto local; AGENTS.md obsoleto | ~2 agentes/semana; mantener plataforma propia | Sin cifras públicas |
+
+## Blueprint: una plataforma interna destilada de los casos
+
+<Callout type="info" title="Esto es una síntesis">
+El diagrama y la lista siguientes son una **síntesis propia** de los patrones que se repiten en los cinco casos, mapeada a un stack ADK + AI gateway + Bedrock. No describen la arquitectura de ninguna de estas empresas.
+</Callout>
+
+<Diagram id="cpi-blueprint" height={580} />
+
+Los componentes, en el orden en que conviene construirlos:
+
+<Steps>
+
+1. **AI gateway como único camino a los modelos.** Uber lo tuvo en 2024 y Cloudflare lo puso "desde el día uno". En tu stack: [LiteLLM Proxy](/guia/arquitectura-adk-gateway-bedrock) (o AgentCore Gateway si todo es Bedrock) con claves virtuales por equipo, presupuestos, PII y atribución de costo. Quita `bedrock:InvokeModel` a todo lo demás.
+2. **Identidad corporativa delante de todo.** IdP + OAuth; identidad propia por agente y propagación del usuario cuando el agente actúa en su nombre. Ningún secreto en el código ni en laptops (Cloudflare, Block).
+3. **Registro y gateway MCP.** Servidores y tools con dueño, **deshabilitados por defecto**, descripción revisada, autorización por tool y redacción de respuestas (Uber). En AWS: [AgentCore Gateway](/guia/aws-bedrock-agentcore) con Identity y Policy en Cedar. Convierte APIs existentes antes de escribir servidores nuevos.
+4. **Control del contexto.** Con decenas de servidores, los esquemas se comen la ventana: descubrimiento incremental, filtros de tools por agente y Code Mode (Uber, Cloudflare). Diseña servidores desde el workflow (Block).
+5. **Camino pavimentado.** Una plantilla o CLI que deja un agente ADK nuevo con gateway, MCP, identidad y telemetría configurados (`aifx` de Uber, login de OpenCode en Cloudflare).
+6. **Registro de agentes.** Dueño, versión, capacidades y estado. Si tus agentes se invocan entre sí, publica Agent Cards de [A2A](/guia/a2a) y versiona capacidades como LMOS.
+7. **Trazas, costo y evaluaciones como contrato.** OpenTelemetry de punta a punta, costo por equipo y agente, set dorado como gate de promoción y evaluación online (LinkedIn, Telekom).
+8. **Gobierno y adopción.** Revisión de seguridad de servidores, allowlist, detección de "shadow MCP" (Cloudflare), anotación de riesgo por tool (Block) y un programa de enablement con historias de pares (Block, Uber).
+
+</Steps>
+
+<Callout type="tip" title="Empieza por los caminos, no por el framework">
+Ninguno de los cinco casos impuso un único framework de agentes a todos sus equipos. Lo que sí centralizaron fueron los **caminos**: hacia modelos, hacia herramientas y hacia identidad. Si mañana un equipo quiere usar Strands o LangGraph en lugar de ADK, tu plataforma debería seguir funcionando igual.
+</Callout>
+
+<Callout type="warning" title="Errores que los casos dejan ver">
+- **Exponer todo lo descubierto.** Convertir automáticamente APIs en tools sin revisión del dueño produce descripciones malas y riesgo innecesario.
+- **Medir solo adopción.** Usuarios activos y tokens crecen solos; Uber reporta costo ×6. Mide costo por tarea resuelta y calidad.
+- **Olvidar el contexto local.** Sin instrucciones por repositorio o dominio, los agentes producen salidas plausibles pero incorrectas (Cloudflare).
+- **Subestimar el ritmo de release.** Seguridad y pruebas limitaron a Telekom a unos dos agentes por semana: presupuesta ese cuello de botella.
+</Callout>
+
+<KeyPoints title="En resumen">
+
+- Las plataformas internas de agentes aparecen cuando la fragmentación (integraciones, secretos, costos) supera el valor de que cada equipo resuelva todo por su cuenta.
+- El patrón común es **centralizar caminos** (AI gateway, gateway MCP, identidad) y **descentralizar la construcción** de agentes.
+- Uber muestra el gateway MCP más grande documentado: registro como control plane, proxy como data plane, tools generadas desde IDL y **deshabilitadas por defecto** (más de 800 servidores, octubre de 2026).
+- Block demuestra que un agente general bien distribuido con servidores MCP curados puede llegar a todas las funciones; Cloudflare, que un **proxy único** con identidad Zero Trust da control sin fricción.
+- Deutsche Telekom y LinkedIn aportan ideas de runtime: agentes como recursos de Kubernetes con capacidades versionadas, y la mensajería existente como orquestador.
+- Todas las cifras son auto-reportadas y muchas no son comparables entre sí; úsalas como orden de magnitud, no como benchmark.
+
+</KeyPoints>
+
+## Siguientes pasos
+
+<Cards cols={3}>
+  <Card title="Arquitectura ADK + gateway + Bedrock" href="/guia/arquitectura-adk-gateway-bedrock">La implementación concreta de los pasos 1 a 3 del blueprint en tu stack.</Card>
+  <Card title="Gateways" href="/guia/gateways">AI gateway vs. gateway MCP, y cómo elegir entre LiteLLM, AgentCore Gateway, Cloudflare y otros.</Card>
+  <Card title="MCP" href="/guia/mcp">Servidores, transportes, autorización y diseño de herramientas.</Card>
+  <Card title="AWS Bedrock y AgentCore" href="/guia/aws-bedrock-agentcore">Runtime, Gateway, Identity, Policy, Memory y Evaluations para construir la plataforma en AWS.</Card>
+  <Card title="Seguridad y gobernanza" href="/guia/seguridad-gobernanza">Identidad de agentes, políticas, shadow MCP y aprobación humana.</Card>
+  <Card title="Casos reales" href="/guia/casos-reales">El resto de la sección: atención al cliente, migraciones de código, datos y finanzas.</Card>
+</Cards>

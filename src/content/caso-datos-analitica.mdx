@@ -1,0 +1,305 @@
+"Pregúntale a los datos en lenguaje natural" es probablemente el agente interno más pedido en cualquier empresa y también el que más engaña: la demo con cinco tablas bien documentadas sale en una tarde, pero el sistema que funciona sobre un warehouse real (miles de tablas, nombres crípticos, métricas con tres definiciones y permisos por equipo) tarda más de un año. Esta página revisa a las empresas que publicaron con más detalle técnico cómo lo hicieron: **Uber** (QueryGPT y Finch), **LinkedIn** (SQL Bot), **Pinterest** (de Text-to-SQL a su Analytics Agent) y dos casos de **operaciones y on-call** (Meta y Uber Genie).
+
+El patrón se repite en todos: **el modelo es lo de menos**. La precisión sale del **contexto semántico** (catálogo, tablas certificadas, consultas históricas), de los **validadores deterministas** y de una **evaluación** diseñada para un problema en el que suele haber más de una respuesta correcta. Estados y cifras a **octubre de 2026**.
+
+Esta página es parte de la sección de [casos reales](/guia/casos-reales). Los agentes de [atención al cliente](/guia/caso-atencion-cliente), [migración de código](/guia/caso-migraciones-codigo), [investigación multiagente](/guia/caso-investigacion-multiagente), [servicios financieros](/guia/caso-servicios-financieros) y las [plataformas internas](/guia/caso-plataformas-internas) sobre las que corren (incluido el gateway de IA de Uber) se tratan en sus propias páginas.
+
+<Callout type="warning" title="Cómo leer las cifras">
+Todas las cifras de esta página las **reportan las propias empresas** (blogs de ingeniería, papers de sus equipos o casos publicados por sus proveedores). No encontramos evaluaciones independientes de ninguno de estos sistemas. Cada cifra va con su fecha y su fuente; los diagramas son **reconstrucciones** a partir de esas publicaciones, no planos oficiales.
+</Callout>
+
+## Por qué un agente de datos es más difícil de lo que parece
+
+Un agente de datos que se equivoca **no se nota**: la consulta corre, devuelve una cifra plausible y termina en una presentación. Los casos públicos coinciden en cinco fuentes de error:
+
+- **Encontrar la tabla correcta.** Uber habla de cientos de miles de datasets; LinkedIn, de millones de tablas; Pinterest llegó a más de 400.000. Ningún prompt arregla una tabla mal elegida.
+- **Esquemas enormes.** Algunas tablas de Uber superan las 200 columnas (40–60K tokens): tres de ellas desbordaban la ventana de contexto de la primera versión de QueryGPT.
+- **Valores de filtro.** El modelo escribe `'completed'` cuando el valor real es `'COMPLETED'`: la consulta compila y devuelve cero filas. En el paper de LinkedIn, el **filtro incorrecto** fue el error más frecuente (24 %).
+- **Ambigüedad de negocio.** "Miembros activos", "gross bookings" o "US&C" significan cosas precisas que no están en el esquema.
+- **Permisos.** El agente no puede devolver datos que el usuario no tiene derecho a ver.
+
+Todo lo que sigue son variaciones sobre cómo resolver esos cinco problemas. Si necesitas repasar las técnicas de base, revisa [RAG](/guia/rag) y [context engineering](/guia/context-engineering).
+
+## Uber: QueryGPT y Finch
+
+### Contexto y escala
+
+Uber publicó **QueryGPT** en septiembre de 2024. El punto de partida: su plataforma de datos recibe cerca de **1,2 millones de consultas interactivas al mes**, y Operaciones genera alrededor del **36 %**. Según la estimación conservadora de Uber, escribir una consulta a mano toma unos **10 minutos**; QueryGPT la deja en **unos 3 minutos**. En un lanzamiento limitado a equipos de Operaciones y Soporte alcanzó un promedio de **~300 usuarios activos diarios**, y el **78 %** de los encuestados dijo que le ahorraba tiempo frente a escribir la consulta desde cero (cifras de Uber, 19-09-2024).
+
+### Arquitectura: acotar el contexto en cascada
+
+La primera versión, de un hackathon, era un RAG simple: buscar por k-NN los esquemas y SQL de ejemplo más parecidos a la pregunta (3 tablas y 7 ejemplos, sobre 7 tablas y 20 consultas) y pasarlos como few-shot. Se degradó al incorporar más tablas: la similitud entre una pregunta y un esquema es mala, y los esquemas grandes no cabían.
+
+La versión de producción reemplaza "un RAG sobre todo" por una **cadena de llamadas LLM especializadas** que van recortando el contexto:
+
+<Diagram id="cda-querygpt" height={520} />
+
+- **Workspaces**: colecciones curadas de tablas y SQL de ejemplo por dominio de negocio (12 de sistema, como Mobility, Core Services, Platform Engineering, IT o Ads, más workspaces que crean los propios equipos).
+- **Intent Agent**: clasifica la pregunta en uno o más workspaces. El RAG pasa de buscar en todo Uber a buscar en un subconjunto curado.
+- **Table Agent**: propone las tablas y **el usuario las confirma o edita** antes de generar. Es la decisión que más condiciona el resultado y la más barata de validar para un humano.
+- **Column Prune Agent**: elimina las columnas irrelevantes de cada esquema, lo que baja tokens, costo y latencia.
+- **Generación**: SQL más una explicación en lenguaje natural. El blog cita GPT-4 Turbo (1106) con 128K tokens de contexto, el modelo vigente en 2024.
+
+### Evaluación
+
+Uber construyó un **set dorado** con preguntas reales extraídas de los logs, con la intención, las tablas y el SQL correctos verificados a mano. Lo corre en dos modos: **vanilla** (de punta a punta, el sistema infiere todo) y **decoupled** (se le entregan la intención y las tablas correctas para aislar la generación de SQL, imitando el caso en que el usuario confirmó tablas). Las métricas son granulares: acierto de intención, solapamiento de tablas (0 a 1), si la consulta corre, si devuelve filas y similitud con el SQL dorado juzgada por un LLM.
+
+Un detalle útil: entre corridas idénticas observaron **~5 % de variación**, así que miran tendencias en el tiempo en vez de reaccionar a cada fluctuación. **Uber no publicó porcentajes agregados de precisión.**
+
+### Límites reconocidos
+
+El blog es explícito: el modelo a veces **inventa tablas, columnas o valores de filtro** (un status mal escrito devuelve cero filas) y el problema "no está resuelto". Las mitigaciones que mencionan son ajustes de prompt, un modo chat para iterar y un agente de validación todavía en planes. Además, con cientos de miles de datasets, el set dorado no puede cubrir todo, y las preguntas suelen admitir más de un SQL válido.
+
+### Finch: la siguiente generación, en Slack y con LangGraph
+
+En julio de 2025 Uber publicó **Finch**, un agente de datos para el equipo de finanzas corporativas que vive en **Slack** y responde con cifras, el detalle de la consulta ejecutada y, si el resultado es grande, un enlace a una hoja de cálculo. Su diseño corrige varias debilidades de QueryGPT:
+
+- **Orquestación con LangGraph**: un **agente supervisor** enruta cada pregunta a sub-agentes (un *SQL Writer* y un *Document Reader*).
+- **Índice de metadatos en OpenSearch** con nombres de columnas, **valores de columnas** y **alias en lenguaje natural**: "GBs" es *gross bookings*, "US&C" es *US and Canada*. El LLM extrae términos de la pregunta y se resuelven con búsqueda difusa contra ese índice. Es la respuesta directa al problema de los valores de filtro.
+- **Data marts curados de una sola tabla** con las métricas más usadas: consultas simples, rápidas y con errores de los que el LLM se recupera solo.
+- **RBAC**: el SQL Writer verifica los permisos del usuario; solo quien está autorizado consulta dimensiones financieras sensibles.
+- **Generative AI Gateway** de Uber para acceder a modelos propios y de terceros y cambiarlos sin tocar el agente.
+
+La evaluación también madura: precisión **por sub-agente**, SQL comparado por **resultados** frente a una consulta dorada, precisión del enrutamiento (para detectar *intent collisions*, como confundir Presto con Oracle EPM) y **regresión** antes de cambiar prompt o modelo. Uber no publicó precisión, latencia ni volumen de uso, y admite que Finch "no es 100 % confiable": el uso ejecutivo requiere verificación y planean un botón para pedir revisión de un experto.
+
+<Callout type="tip" title="Qué puedes aplicar de Uber">
+- Acota el contexto **por etapas** (dominio, tablas, columnas) en vez de un RAG plano; cada etapa se puede evaluar por separado.
+- Pon al humano donde su validación es más barata y más valiosa: **confirmar tablas**.
+- Indexa **valores y alias de columnas**, no solo nombres. Es la defensa más directa contra filtros inventados.
+- Compara SQL por **resultados**, no por texto, y corre regresión antes de cada cambio de prompt o modelo ([evaluación y observabilidad](/guia/evaluacion-observabilidad)).
+</Callout>
+
+## LinkedIn: SQL Bot
+
+### Contexto y escala
+
+**SQL Bot** es el asistente de text-to-SQL de LinkedIn, integrado en **DARWIN**, su plataforma de ciencia de datos. Hay dos fuentes primarias: el blog de ingeniería (09-12-2024) y un paper del mismo equipo presentado en un workshop de KDD 2025 (arXiv, 18-07-2025), que es la publicación más detallada y con más datos negativos de toda esta página. El sistema está disponible desde julio de 2024 y su desarrollo tomó más de un año.
+
+Escala reportada por el paper: **más de 300 usuarios activos semanales**, ~20 % de ellos vuelve la semana siguiente, el **33 %** de las sesiones termina con código pegado en el editor SQL y la respuesta promedio tarda **menos de 60 segundos**. El blog agrega un dato de producto clave: integrarlo **dentro de DARWIN** multiplicó la adopción **5–10x** frente al prototipo independiente, y el botón **"Fix with AI"** sobre consultas fallidas concentra **~80 % de las sesiones**.
+
+### Arquitectura: el grafo de conocimiento hace el trabajo pesado
+
+<Diagram id="cda-linkedin" height={520} />
+
+- **Grafo de conocimiento** construido desde DataHub (esquemas, valores más frecuentes, *partition keys*, clasificación métrica/dimensión), agregados de los **logs de consultas** (popularidad, joins comunes), notebooks y ejemplos certificados y conocimiento de dominio aportado por usuarios.
+- **Certificación de datasets**: expertos escriben descripciones obligatorias de tabla; la IA completa anotaciones desde documentación y Slack. Las tablas deprecadas en DataHub salen solas del índice.
+- **Personalización**: datasets por defecto según el área del usuario (organigrama) y su historial de acceso, para desambiguar preguntas.
+- **Recuperación y ranking**: la popularidad reduce millones de tablas a unos miles; la búsqueda por embeddings trae **20 candidatas**; un **re-ranker LLM** deja **7** y un segundo paso elige los campos.
+- **Escritura con plan**: el escritor arma un plan proporcional a la dificultad (el planner tiene instrucciones de minimizar pasos) y resuelve de forma incremental.
+- **Validadores y autocorrección**: verifican que tablas y campos existan y ejecutan `EXPLAIN` en Trino; si algo falla, un agente puede buscar tablas o campos adicionales antes de reescribir (máximo dos pasadas, según el paper).
+- **Orquestación**: LangChain y LangGraph, con un clasificador de intención que enruta a escritura de consultas, búsqueda de datos, corrección o preguntas generales.
+
+En **permisos**, LinkedIn tomó una decisión pragmática: si el usuario no tiene acceso a un dataset pero pertenece a un grupo que sí, SQL Bot le entrega código que usa las credenciales de ese grupo. El acceso sigue gobernado por el sistema de permisos existente; el agente solo ayuda a usarlo.
+
+### Resultados, incluidos los negativos
+
+| Métrica (benchmark interno, 133 preguntas, 10 áreas) | Valor | Fuente |
+|---|---|---|
+| Recall de tablas / columnas | 78 % / 56 % | Paper, jul-2025 |
+| Consultas que compilan | 96 % (66 % sin los componentes de validación) | Paper, jul-2025 |
+| Tablas y columnas válidas (sin alucinación) | 99 % (77 % sin validación) | Paper, jul-2025 |
+| Respuestas con puntaje alto (4–5), revisión experta | 53 % | Paper, jul-2025 |
+| Solo con esquemas (sin grafo de conocimiento) | 9 % con puntaje alto | Paper, jul-2025 |
+| Encuesta: "Passes" o mejor / "Very good" o mejor | ~95 % / ~40 % | Blog, dic-2024 |
+
+Lo importante está en las ablaciones: los componentes de **conocimiento** (consultas de ejemplo, clusters de tablas, atributos de columnas) suben la calidad; los de **modelado** (validadores, corrección) logran que la consulta compile y no alucine nombres, pero cambian poco el puntaje final. Y varias técnicas populares **no ayudaron** en su caso: planificación de consulta, generación de múltiples candidatos y expansión de la pregunta.
+
+En evaluación, LinkedIn aprendió que **~60 % de las preguntas admite más de una respuesta correcta**: sin aceptar alternativas, el recall se subreportaba 10–15 puntos. Usan LLM-as-judge (a un punto o menos del juicio humano el 75 % de las veces) y renuevan el benchmark con expertos cada tres meses.
+
+### Límites
+
+El paper reconoce que el benchmark es interno y que cada configuración se corrió una sola vez; que los **valores de columna inválidos** quedan para trabajo futuro; y que la autoconsistencia no era viable porque el sistema no ejecuta candidatos sobre los datos. También hay una inconsistencia menor entre cifras (53 % en la revisión experta, 48 % en la tabla de ablación y 49 % en la conclusión), que corresponde a métodos de evaluación distintos.
+
+<Callout type="tip" title="Qué puedes aplicar de LinkedIn">
+- Invierte primero en **metadatos certificados y consultas de ejemplo**: según sus ablaciones, es lo que más mueve la aguja.
+- Usa el **organigrama y el historial de uso** para desambiguar; la misma pregunta significa cosas distintas según quién la hace.
+- Diseña validadores que verifiquen **lo que el escritor no sabía** (existencia real de tablas, `EXPLAIN`), no que repitan su razonamiento.
+- Entra por el dolor de mayor retorno (**arreglar consultas fallidas**) y dentro de la herramienta que la gente ya usa.
+</Callout>
+
+## Pinterest: de Text-to-SQL al Analytics Agent
+
+<Callout type="info" title="Sobre las fuentes de Pinterest">
+Los posts originales de Pinterest Engineering (abril de 2024 y marzo de 2026) están en Medium y no pudimos acceder a ellos directamente durante esta investigación. Las cifras de esta sección provienen de **resúmenes secundarios** de esos posts (ZenML, sysdesign-wiki) y del **caso de cliente publicado por DataHub** (2026), que coinciden entre sí. Trátalas con esa cautela.
+</Callout>
+
+### 2024: RAG para elegir tablas
+
+La primera etapa vive en **Querybook**, la herramienta SQL open source de Pinterest. La versión inicial pedía al usuario elegir las tablas; el prompt incluía esquemas y, como detalle valioso, los **valores únicos de columnas de baja cardinalidad**, para que el filtro dijera `'WEB'` y no `'web'`. La segunda versión agregó RAG para **seleccionar tablas**: un índice en OpenSearch con **resúmenes de tablas** (solo de las tablas de mayor *tier*) y **resúmenes de consultas** históricas, donde los resúmenes de tabla pesan más; un LLM elige entre los candidatos y el usuario confirma.
+
+Resultados reportados (abril de 2024, vía resumen secundario): la **aceptación al primer intento** del SQL generado subió de **20 % a más de 40 %**, y la velocidad en tareas de escritura de SQL mejoró **35 %** (Pinterest aclara que esa medición no controla diferencias entre tareas). La tasa de acierto de la búsqueda de tablas era **40 % sin documentación** en los embeddings y llegó a **90 %** al darle más peso a la documentación. El propio equipo listaba como pendientes que el SQL salía **sin validación** y que los índices se actualizaban a mano.
+
+### 2026: Analytics Agent sobre contexto gobernado
+
+En marzo de 2026 Pinterest describió la evolución a un **Analytics Agent** que ayuda a descubrir tablas, reutilizar consultas y generar SQL validado sobre **más de 100.000 tablas analíticas** para **más de 2.500 usuarios analíticos**:
+
+<Diagram id="cda-pinterest" height={520} />
+
+- **Indexar la intención, no la tabla.** Cada consulta histórica se enriquece con metadatos del catálogo y un LLM la describe como **la pregunta de negocio que respondía**. Eso es lo que se embebe. Una pregunta nueva se compara con preguntas pasadas, no con descripciones de tablas que casi nadie escribió. En paralelo extraen patrones estructurales: joins con sus claves, filtros habituales y agregaciones.
+- **Herramientas vía MCP**: búsqueda de tablas, búsqueda de consultas, búsqueda de conocimiento (documentación de expertos, definiciones de métricas) y ejecución en Presto. Encaja con lo que explicamos en [MCP](/guia/mcp).
+- **Validación**: tablas y columnas se verifican contra el catálogo, se perfilan columnas para que los valores de filtro existan, se reutilizan claves de join conocidas, se corre `EXPLAIN` antes de ejecutar, con reintentos acotados y un **`LIMIT 100`** por defecto.
+- **Jerarquía de conflictos** explícita cuando las fuentes discrepan: documentación de expertos, luego metadatos del catálogo, luego patrones de consultas y, al final, conocimiento general del modelo.
+- **Infraestructura**: base vectorial sobre AWS OpenSearch con millones de embeddings actualizados a diario.
+
+La pieza menos vistosa y más importante es la **gobernanza**. PinCat, la implementación de DataHub de Pinterest, asigna a cada tabla un *tier* (1: producción documentada y revisada; 2: de equipo, con dueño; 3: temporal, con limpieza automática), dueño, retención y glosario, y el ranking combina similitud con tier, frescura, documentación y ownership. Según DataHub, la limpieza llevó el warehouse de **~400.000 a ~100.000 tablas** (~30 % de las tablas más usadas eran de personas que ya no estaban en la empresa), y la documentación con IA más el *lineage* eliminó **~70 %** del trabajo manual de documentación.
+
+Resultados de adopción (Pinterest y DataHub, 2026): es el **agente más usado de Pinterest**, con **~10x** el uso del siguiente, y llegó al **40 % de los analistas en dos meses**, con una meta de 50 % a fin de año. **No publicaron métricas de precisión del SQL**; reconocen que la generación "tiene margen de mejora" y citan como casos difíciles las *window functions* complejas, los términos de negocio ambiguos sin documentar, los conflictos entre dominios y los patrones deprecados que persisten en el índice.
+
+<Callout type="tip" title="Qué puedes aplicar de Pinterest">
+- **La gobernanza es la base de la precisión.** Si tu catálogo no distingue tablas certificadas de tablas abandonadas, el agente tampoco podrá.
+- Convierte tu historial de consultas en un **índice de preguntas de negocio**; es documentación que ya existe.
+- Define por escrito **qué fuente gana** cuando el catálogo, la documentación y el historial se contradicen.
+- Ojo con la frescura: un patrón deprecado que queda en el índice se seguirá recomendando.
+</Callout>
+
+## Operaciones y on-call: Meta y Uber Genie
+
+Los agentes de operaciones trabajan sobre cambios de código, telemetría y documentación, pero comparten el problema central: **acotar un espacio de búsqueda enorme** antes de que el modelo razone.
+
+### Meta: causa raíz asistida por IA
+
+En junio de 2024 Meta describió un sistema para investigar incidentes en su monorepo web. No es un agente con bucle de herramientas, sino un pipeline en dos etapas: un **recuperador heurístico** (dueños de código y directorios, grafo de llamadas en runtime de los sistemas afectados) reduce miles de cambios a unos cientos, y un **ranker basado en Llama 2 (7B)** los ordena hasta dejar cinco. Como no caben cientos de cambios en un prompt, usan un "ranking por elección": lotes de hasta 20 cambios, el modelo elige cinco por lote y se repite hasta quedar con cinco. El modelo se ajustó con ~5.000 ejemplos de investigaciones resueltas, además de wikis y código internos.
+
+Resultado reportado: la causa raíz estaba entre las cinco sugerencias en el **42 %** de las investigaciones, medido con *backtesting* sobre investigaciones históricas usando solo la información disponible al abrirlas (Meta, 24-06-2024). Meta reconoce el riesgo de **sugerir una causa equivocada** y mandar a los ingenieros por el camino incorrecto; por eso privilegia la explicabilidad (los resultados se pueden reproducir) y **no muestra las respuestas de baja confianza**, sacrificando recall a favor de precisión.
+
+### Uber Genie: copiloto on-call en Slack
+
+**Genie** (Uber, 10-10-2024) responde preguntas en los canales de soporte de Slack de equipos de plataforma, que recibían cerca de **45.000 preguntas al mes**. Es un RAG sobre la wiki interna, el Stack Overflow interno y documentos de ingeniería. Tres decisiones vale la pena copiar:
+
+- **Solo fuentes ampliamente accesibles.** Para no exponer contenido restringido a quien no debe verlo, indexaron únicamente fuentes pre-curadas que la mayoría de los ingenieros ya puede leer. Es una forma simple de resolver permisos: limitar el corpus.
+- **Citas obligatorias.** Cada fragmento lleva su URL y el modelo debe responder solo desde esos fragmentos, citándolos.
+- **Feedback y evaluación en el flujo.** Botones en Slack alimentan un dashboard; un LLM-as-judge mide alucinación y relevancia, y también evalúa **la calidad de los documentos** fuente.
+
+Resultados reportados desde septiembre de 2023: **154 canales**, **más de 70.000 preguntas**, **48,9 %** de respuestas marcadas como útiles y unas **13.000 horas** de ingeniería ahorradas (estimación de Uber). Visto al revés, algo más de la mitad no fue calificada como útil: el copiloto ayuda, no reemplaza a la guardia.
+
+<Callout type="tip" title="Qué puedes aplicar de operaciones">
+- Pon **heurísticas baratas antes del LLM** para reducir el espacio de búsqueda (ownership, grafo de dependencias, ventana de tiempo).
+- En diagnóstico, una sugerencia equivocada cuesta caro: **oculta las respuestas de baja confianza** y mide con *backtesting* sobre incidentes reales.
+- Si no puedes filtrar permisos por documento, **limita el corpus** a lo que todos pueden ver ([seguridad y gobernanza](/guia/seguridad-gobernanza)).
+</Callout>
+
+## Otros casos con menos detalle público
+
+- **Swiggy Hermes V3** (InfoQ, 02-01-2026): asistente en Slack que, como Pinterest, convierte SQL histórico de Snowflake en descripciones en lenguaje natural para usarlas como ejemplos, con memoria de conversación, un orquestador estilo ReAct que verifica si la pregunta está completa y pide aclaraciones, y una capa de explicación con supuestos y nivel de confianza. Swiggy reporta que la precisión de SQL subió de **54 % a 93 %**, sin que el resumen publicado detalle cómo se midió.
+- **MoneySuperMarket (Mony Group) con Conversational Analytics en BigQuery** (Google Cloud, 30-06-2026): testimonio en el anuncio de disponibilidad general: análisis "de semanas a minutos" y **medio día por semana** ahorrado por analista financiero. Sin detalle técnico, pero el producto empaqueta el mismo patrón: hereda permisos de BigQuery, audita cada consulta, limita los bytes por consulta y se fundamenta en *verified queries*.
+
+## Comparativa
+
+| | Uber QueryGPT / Finch | LinkedIn SQL Bot | Pinterest Analytics Agent | Meta RCA / Uber Genie |
+|---|---|---|---|---|
+| **Fecha de la fuente** | sep-2024 / jul-2025 | dic-2024 / jul-2025 | abr-2024 / mar-2026 | jun-2024 / oct-2024 |
+| **Usuarios** | Ops y Soporte / Finanzas | Empleados en DARWIN | Analistas | Ingenieros on-call |
+| **Resolución de esquema** | Workspaces + agentes de intención, tablas y columnas / índice de valores y alias | Grafo de conocimiento + EBR + re-ranker LLM | Índice de intención de consultas históricas + catálogo con tiers | Heurísticas de ownership / RAG sobre docs |
+| **Validación** | Humano confirma tablas; validador en planes / reintento ante error | Existencia de tablas + `EXPLAIN` + autocorrección | Catálogo + perfilado + `EXPLAIN` + `LIMIT 100` | Umbral de confianza / citas obligatorias |
+| **Permisos** | RBAC en Finch | Permisos existentes; credenciales de grupo | Gobernanza en PinCat (sin detalle de ACL en el índice) | Corpus limitado a fuentes abiertas (Genie) |
+| **Cifra principal** | ~10 → ~3 min por consulta; ~300 DAU | 53 % alto puntaje experto; 5–10x adopción en DARWIN | 40 % de analistas en 2 meses; ~10x el siguiente agente | 42 % causa en top-5 / 48,9 % útil |
+| **Precisión publicada** | No | Sí (benchmark interno) | No (2026) | Sí (backtesting) / parcial |
+
+## Patrones comunes
+
+Leídos juntos, los casos convergen en una arquitectura reconocible. Aplicada a un stack ADK + AI gateway + Bedrock (síntesis nuestra, no la arquitectura de ninguna de estas empresas):
+
+<Diagram id="cda-patron" height={520} />
+
+1. **El contexto semántico es el producto.** Catálogo con tablas certificadas, descripciones, valores de columnas, alias de negocio e historial de consultas. LinkedIn lo midió (9 % con solo esquemas), Pinterest lo convirtió en programa de gobernanza y Finch lo resolvió con data marts curados. Es [context engineering](/guia/context-engineering) aplicado a datos.
+2. **Acotar antes de generar.** Dominio, luego tablas, luego columnas. Cada etapa reduce tokens y errores, y se puede evaluar por separado.
+3. **Validadores deterministas entre el agente y el warehouse.** Existencia de tablas, `EXPLAIN`, solo lectura, `LIMIT`. No confían en que el modelo "se porte bien".
+4. **Ejecutar con los permisos del usuario.** RBAC (Finch), permisos existentes (LinkedIn), herencia de permisos del warehouse (BigQuery). El agente nunca debería tener más acceso que quien pregunta.
+5. **El humano donde rinde más.** Confirmar tablas (Uber, Pinterest 2024), revisión experta a pedido (Finch), SQL visible en cada respuesta.
+6. **Integrarse en la herramienta existente.** DARWIN, Querybook, Slack. LinkedIn midió 5–10x más adopción.
+7. **Evaluación que acepta varias respuestas correctas.** Comparar por resultados, set dorado renovado con expertos, regresión antes de cambiar modelo o prompt.
+
+El validador del punto 3 es código, no prompt. Un ejemplo mínimo con [sqlglot](https://github.com/tobymao/sqlglot) (probado con sqlglot 30.x): rechaza lo que no sea lectura, verifica tablas contra una allowlist (en producción, las tablas tier 1 de tu catálogo) y fuerza un `LIMIT`.
+
+```python title="herramientas/validar_sql.py"
+import sqlglot
+from sqlglot import exp
+
+# Tablas certificadas que este agente puede leer. En producción, sácalas del catálogo.
+ALLOWLIST = {"finanzas.ventas_diarias", "finanzas.dim_tienda", "ops.devoluciones"}
+LIMITE_FILAS = 100
+
+def validar_sql(sql: str) -> dict:
+    """Valida el SQL generado antes de ejecutarlo. Devuelve el SQL normalizado
+    (con LIMIT) o un error accionable para que el agente lo corrija."""
+    try:
+        sentencias = sqlglot.parse(sql, read="bigquery")
+    except sqlglot.errors.ParseError as e:
+        return {"ok": False, "error": f"SQL inválido: {e.errors[0]['description']}"}
+    if len(sentencias) != 1:
+        return {"ok": False, "error": "Envía exactamente una sentencia."}
+    arbol = sentencias[0]
+    # Solo lectura: SELECT, UNION o WITH ... SELECT, sin DML/DDL anidado
+    if not isinstance(arbol, exp.Query) or arbol.find(
+            exp.Insert, exp.Update, exp.Delete, exp.Merge, exp.Create, exp.Drop):
+        return {"ok": False, "error": "Solo se permiten consultas SELECT."}
+    ctes = {c.alias_or_name for c in arbol.find_all(exp.CTE)}
+    usadas = {f"{t.db}.{t.name}" for t in arbol.find_all(exp.Table) if t.name not in ctes}
+    fuera = sorted(usadas - ALLOWLIST)
+    if fuera:  # típico de una tabla alucinada o no certificada
+        return {"ok": False, "error": f"Tablas no permitidas o inexistentes: {fuera}. "
+                                      f"Usa solo: {sorted(ALLOWLIST)}"}
+    if not arbol.args.get("limit"):
+        arbol = arbol.limit(LIMITE_FILAS)                      # [!code highlight]
+    return {"ok": True, "sql": arbol.sql(dialect="bigquery"), "tablas": sorted(usadas)}
+```
+
+Y la herramienta que expones al agente de ADK combina ese validador con un *dry run* para estimar costo y ejecuta con las **credenciales del usuario**, no con una cuenta de servicio:
+
+```python title="herramientas/consultar.py"
+from google.cloud import bigquery
+from google.oauth2.credentials import Credentials
+from google.adk.tools import ToolContext
+from herramientas.validar_sql import validar_sql
+
+MAX_BYTES = 5 * 10**9  # 5 GB por consulta; lo define el equipo de datos
+
+def consultar_warehouse(sql: str, tool_context: ToolContext) -> dict:
+    """Ejecuta una consulta de SOLO LECTURA sobre tablas certificadas y devuelve
+    hasta 100 filas. Si recibes un error, corrige el SQL según el mensaje."""
+    v = validar_sql(sql)
+    if not v["ok"]:
+        return v
+    # El token del usuario lo fija el canal en el estado de la sesión, nunca el modelo
+    cliente = bigquery.Client(credentials=Credentials(tool_context.state["user_token"]),
+                              project=tool_context.state["proyecto"])
+    plan = cliente.query(v["sql"], job_config=bigquery.QueryJobConfig(
+        dry_run=True, use_query_cache=False))
+    if plan.total_bytes_processed > MAX_BYTES:
+        return {"ok": False, "error": "La consulta leería demasiados datos; "
+                                      "agrega un filtro por fecha o partición."}
+    filas = cliente.query(v["sql"], job_config=bigquery.QueryJobConfig(
+        maximum_bytes_billed=MAX_BYTES)).result()
+    return {"ok": True, "sql": v["sql"], "filas": [dict(f.items()) for f in filas]}
+```
+
+Si tu warehouse está en AWS, la idea es la misma con otras piezas: `EXPLAIN` en Athena o Redshift en lugar del *dry run*, y ejecución con un rol IAM derivado de la identidad del usuario. Si prefieres no escribir la herramienta, Google ofrece desde enero de 2026 un **servidor MCP remoto de BigQuery** (en preview en ese momento) que ADK consume con `McpToolset` y OAuth; aun así, mantén un validador propio para la allowlist y los límites de tu organización.
+
+<Callout type="danger" title="Errores comunes">
+- **Dar al agente una cuenta de servicio con acceso a todo.** Un usuario sin permisos sobre una tabla de salarios no debe obtener la respuesta "preguntándole al agente". Ejecuta con su identidad.
+- **Confiar en que el modelo no escriba.** Una instrucción "solo SELECT" en el prompt no es un control. El parser y los permisos de solo lectura del warehouse, sí.
+- **Medir con exact match del SQL.** La mayoría de las preguntas reales admite varias consultas correctas: compara resultados y acepta alternativas.
+- **Indexar todo el warehouse.** Más tablas en el índice significa más candidatas equivocadas. Empieza por las certificadas.
+</Callout>
+
+<KeyPoints title="En resumen">
+
+- En los cuatro casos, la precisión depende más del **contexto semántico** (catálogo, tablas certificadas, valores de columnas, consultas históricas) que del modelo. LinkedIn lo midió: solo con esquemas, 9 % de respuestas de alta calidad.
+- Uber pasó de un RAG plano a **acotar en cascada** (dominio, tablas, columnas) con el humano confirmando tablas; Finch sumó un índice de **valores y alias** y data marts curados.
+- Pinterest muestra que la **gobernanza** (tiers, dueños, retención) es requisito del agente: limpiar de ~400.000 a ~100.000 tablas fue parte del proyecto.
+- Los validadores deterministas (`EXPLAIN`, existencia de tablas, solo lectura, `LIMIT`) hacen que la consulta compile y no alucine nombres; no garantizan que la respuesta sea correcta.
+- La **integración en herramientas existentes** (DARWIN, Querybook, Slack) explica buena parte de la adopción.
+- Casi nadie publica precisión de punta a punta, y las cifras que hay son auto-reportadas. Construye tu propio set dorado con varias respuestas aceptadas y regresión antes de cada cambio.
+
+</KeyPoints>
+
+## Siguientes pasos
+
+<Cards cols={3}>
+  <Card title="Casos reales: panorama" href="/guia/casos-reales">Qué tienen en común las empresas que ya operan agentes a gran escala.</Card>
+  <Card title="Plataformas internas de agentes" href="/guia/caso-plataformas-internas">Gateways de IA y de MCP, registro y gobierno: la base sobre la que corren agentes como Finch.</Card>
+  <Card title="Servicios financieros" href="/guia/caso-servicios-financieros">Agentes en banca y finanzas reguladas: controles, auditoría y riesgo.</Card>
+  <Card title="Context engineering" href="/guia/context-engineering">Cómo decidir qué entra en la ventana de contexto y qué se queda fuera.</Card>
+  <Card title="Evaluación y observabilidad" href="/guia/evaluacion-observabilidad">Sets dorados, graders, LLM-as-judge y trazas en producción.</Card>
+  <Card title="Seguridad y gobernanza" href="/guia/seguridad-gobernanza">Mínimo privilegio, identidad del usuario y auditoría de herramientas.</Card>
+</Cards>

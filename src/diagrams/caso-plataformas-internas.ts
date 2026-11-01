@@ -1,0 +1,240 @@
+import type { IsoSpec } from '../components/iso/types'
+
+/* Todos los diagramas de esta página son RECONSTRUCCIONES a partir del texto
+   publicado por cada empresa (ver docs/research/casos/caso-plataformas-internas.md).
+   No son diagramas oficiales. El último (blueprint) es una síntesis propia. */
+
+export const cpiUberMcp: IsoSpec = {
+  id: 'cpi-uber-mcp',
+  title: 'Uber: MCP Gateway con registro (control plane) y proxy (data plane)',
+  summary:
+    'Reconstrucción a partir del post de Uber Engineering del 1 de octubre de 2026 (no es un diagrama oficial). Un **MCP Registry** es la fuente de verdad de qué servidores y tools existen, quién es dueño y qué está habilitado; un **Proxy Gateway** ejecuta cada llamada MCP traduciéndola a HTTP, gRPC o TChannel. Un crawler convierte las IDL existentes en tools **deshabilitadas por defecto**.',
+  height: 540,
+  zones: [{ id: 'back', label: 'Servicios y servidores de destino', from: [8.6, -5.0], to: [11.8, 5.0], tone: 'tool' }],
+  nodes: [
+    { id: 'agente', label: 'Agentes y clientes', sub: 'Agent Builder · aifx · IDE', at: [0, 0], shape: 'tall', tone: 'agent', icon: 'bot', info: 'Agentes no-code de Uber Agent Builder, agentes de código aprovisionados con la CLI `aifx`, IDE y servicios. Para todos hay un solo punto de entrada MCP.' },
+    { id: 'dueno', label: 'Equipo dueño', sub: 'revisa y habilita', at: [0, -3.4], shape: 'person', tone: 'user', icon: 'user', info: 'Cada servidor y cada tool nace deshabilitado. El equipo dueño del servicio revisa la descripción, la habilita y aprueba cada cambio como un diff con rollback.' },
+    { id: 'proxy', label: 'Proxy Gateway', sub: 'data plane', at: [3.4, 0], shape: 'hex', tone: 'gateway', icon: 'router', info: 'Expone un endpoint MCP por servidor virtual, traduce la llamada al protocolo del servicio y vuelve a MCP. Refresca su configuración en memoria periódicamente: habilitar una tool no requiere reiniciar.' },
+    { id: 'registry', label: 'MCP Registry', sub: 'control plane', at: [3.4, -3.4], shape: 'cylinder', tone: 'data', icon: 'database', info: 'Fuente de verdad de descubrimiento, ownership y habilitación. Uber reporta más de 800 servidores MCP y más de 5.000 tools (octubre de 2026).' },
+    { id: 'acs', label: 'Control de acceso', sub: 'política por tool', at: [3.4, 3.8], shape: 'diamond', tone: 'guard', icon: 'shield', info: 'El Access Control System interno evalúa políticas por servidor, con override por tool. El llamador puede ser una persona, un servicio o un agente.' },
+    { id: 'crawler', label: 'AutoCrawler', sub: 'workflow Cadence · cron', at: [6.8, -3.4], shape: 'box', tone: 'infra', icon: 'repeat', info: 'Suscrito al registro de IDL: crea un servidor MCP virtual por servicio, convierte Protobuf/Thrift a JSON-RPC y usa un LLM para redactar descripciones de tools legibles por agentes.' },
+    { id: 'mesh', label: 'Muttley', sub: 'sidecar de service mesh', at: [6.8, 0], shape: 'box', tone: 'infra', icon: 'network', info: 'Las llamadas a servicios con IDL se serializan a Protobuf/Thrift y salen por el sidecar de malla existente: mismo ruteo que el tráfico entre microservicios.' },
+    { id: 'idl', label: 'Registro de IDL', sub: 'Protobuf · Thrift', at: [10.2, -3.4], shape: 'doc', tone: 'data', icon: 'file', info: 'Las definiciones de interfaz que Uber ya tenía para miles de servicios. Son la materia prima de las tools: no hubo que reescribir servicios.' },
+    { id: 'svc', label: 'Servicios internos', sub: 'HTTP · gRPC · TChannel', at: [10.2, 0], shape: 'box', tone: 'tool', icon: 'server', info: 'Miles de servicios internos que pasan a ser herramientas sin escribir un servidor MCP para cada uno.' },
+    { id: 'saas', label: 'Nativos y terceros', sub: 'MCPFx · Jira · Google', at: [10.2, 3.4], shape: 'cloud', tone: 'tool', icon: 'cloud', info: 'Servidores MCP nativos (construidos con MCPFx y descubiertos por heartbeat) se proxifican tal cual. Para terceros se reenvía el token del usuario y se intercambia por uno externo.' },
+  ],
+  edges: [
+    { from: 'agente', to: 'proxy', label: 'MCP' },
+    { from: 'dueno', to: 'registry' },
+    { from: 'registry', to: 'proxy', route: 'z', dashed: true },
+    { from: 'proxy', to: 'acs', route: 'z' },
+    { from: 'proxy', to: 'mesh' },
+    { from: 'mesh', to: 'svc' },
+    { from: 'proxy', to: 'saas' },
+    { from: 'idl', to: 'crawler' },
+    { from: 'crawler', to: 'registry' },
+  ],
+  steps: [
+    { title: '1 · Descubrir lo que ya existe', body: 'AutoCrawler lee el registro de IDL, genera un servidor MCP virtual por servicio y descripciones de tools con un LLM. Todo queda registrado **deshabilitado**.', flows: ['idl>crawler', 'crawler>registry'] },
+    { title: '2 · Descubrir no es exponer', body: 'El equipo dueño revisa descripciones y habilita solo las tools que quiere ofrecer. Cada cambio posterior es un diff que aprueba y puede revertir.', flows: ['dueno>registry'] },
+    { title: '3 · Config al data plane', body: 'El proxy refresca su configuración desde el registro a intervalos fijos. Una tool recién habilitada aparece sin redeploy.', flows: ['registry>proxy'] },
+    { title: '4 · Llamada y autorización', body: 'El agente invoca una tool. El gateway consulta el control de acceso a nivel de tool para esa identidad (persona, servicio o agente).', flows: ['agente>proxy', 'proxy>acs', 'acs>proxy'] },
+    { title: '5 · Traducir y ejecutar', body: 'La llamada MCP se convierte en una petición gRPC/Thrift/HTTP y sale por la malla de servicios existente.', flows: ['proxy>mesh', 'mesh>svc', 'svc>mesh'] },
+    { title: '6 · Nativos y terceros', body: 'Servidores MCP nativos se proxifican; los de terceros reciben el token del usuario, que se intercambia por una credencial externa.', flows: ['proxy>saas', 'saas>proxy'] },
+    { title: '7 · Respuesta redactada', body: 'El gateway redacta PII de la respuesta antes de devolverla. Para no saturar el contexto, Uber agregó descubrimiento incremental ("Omni MCP"), proyección de campos y *Code Mode* vía `aifx`.', flows: ['proxy>agente'] },
+  ],
+}
+
+export const cpiBlockGoose: IsoSpec = {
+  id: 'cpi-block-goose',
+  title: 'Block: goose en cada laptop + servidores MCP curados',
+  summary:
+    'Reconstrucción a partir de publicaciones de Block de 2025 (no es un diagrama oficial). La "plataforma" es sobre todo **distribución y curaduría**: goose llega preinstalado con modelos configurados y un set de servidores MCP internos aprobados; la autorización es OAuth por usuario y el riesgo se marca en cada tool.',
+  height: 520,
+  nodes: [
+    { id: 'empleado', label: 'Empleado', sub: '15 funciones', at: [0, 0], shape: 'person', tone: 'user', icon: 'user', info: 'Block reporta uso en 15 funciones, no solo ingeniería (charla de diciembre de 2025).' },
+    { id: 'sw', label: 'Software center', sub: 'instala y actualiza', at: [0, -3.4], shape: 'box', tone: 'infra', icon: 'boxes', info: 'goose se distribuye por el centro de software interno: instalación y actualización automáticas en los equipos de la empresa.' },
+    { id: 'devrel', label: 'DevRel interno', sub: 'talleres · canales', at: [0, 3.4], shape: 'person', tone: 'neutral', icon: 'graduation', info: 'Sesiones semanales de formación y canales internos para preguntas y para compartir casos que funcionaron.' },
+    { id: 'goose', label: 'goose', sub: 'desktop · CLI · local', at: [3.4, 0], shape: 'tall', tone: 'agent', icon: 'bot', info: 'Agente de propósito general open source (hoy en la Agentic AI Foundation). Corre en la máquina del empleado y habla MCP con las herramientas.' },
+    { id: 'idp', label: 'OAuth / SSO', sub: 'keychain', at: [3.4, -3.6], shape: 'hex', tone: 'guard', icon: 'key', info: 'OAuth al primer uso, scopes mínimos y tokens en el keychain del sistema. En abril de 2025 el flujo corría dentro de servidores MCP locales, algo que Block llamó solución temporal.' },
+    { id: 'review', label: 'Revisión y riesgo', sub: 'read-only vs destructiva', at: [3.4, 3.4], shape: 'diamond', tone: 'guard', icon: 'shield', info: 'Cada tool se anota como de solo lectura o destructiva; las destructivas piden confirmación. Algunos servidores limitan qué modelos pueden usarlos.' },
+    { id: 'modelos', label: 'Modelos', sub: 'vía Databricks', at: [6.8, -3.4], shape: 'sphere', tone: 'model', icon: 'brain', info: 'En 2025 Block usaba Databricks como plataforma de hosting para acceder a modelos de Anthropic y OpenAI mediante endpoints gestionados por la empresa.' },
+    { id: 'mcp', label: 'MCP internos', sub: '60+ (jun-2025)', at: [6.8, 0], shape: 'tall', tone: 'tool', icon: 'plug', info: 'Escritos por ingenieros de Block y diseñados desde el workflow, no desde el endpoint. Más de 60 en junio de 2025; una charla posterior habla de más de 100.' },
+    { id: 'sistemas', label: 'Sistemas', sub: 'Snowflake · Jira · Slack', at: [10.2, 0], shape: 'cloud', tone: 'tool', icon: 'cloud', info: 'Datos y herramientas de trabajo: Snowflake, GitHub, Jira, Slack, Google Drive y APIs internas (compliance, triage de soporte).' },
+  ],
+  edges: [
+    { from: 'sw', to: 'goose' },
+    { from: 'empleado', to: 'goose' },
+    { from: 'devrel', to: 'empleado', dashed: true },
+    { from: 'goose', to: 'idp', route: 'z' },
+    { from: 'goose', to: 'modelos' },
+    { from: 'goose', to: 'mcp' },
+    { from: 'review', to: 'mcp', dashed: true },
+    { from: 'mcp', to: 'sistemas' },
+  ],
+  steps: [
+    { title: '1 · Llega instalado', body: 'goose se instala y actualiza solo, con modelos preconfigurados y un set curado de servidores MCP aprobados. Cero configuración para el empleado.', flows: ['sw>goose'] },
+    { title: '2 · Pedido en lenguaje natural', body: 'Alguien de ventas pide cruzar una lista de leads con datos de Snowflake. goose razona con un modelo servido por endpoints corporativos.', flows: ['empleado>goose', 'goose>modelos', 'modelos>goose'] },
+    { title: '3 · OAuth al primer uso', body: 'La primera vez que una tool necesita acceso, se lanza el flujo OAuth con scopes mínimos. El token queda en el keychain, no en un archivo.', flows: ['goose>idp', 'idp>goose'] },
+    { title: '4 · Tool con nivel de riesgo', body: 'La tool de lectura se ejecuta sin fricción; una destructiva pediría confirmación. El riesgo lo declara el servidor con anotaciones.', flows: ['goose>mcp', 'review>mcp'] },
+    { title: '5 · Sistemas reales', body: 'El servidor MCP consulta Snowflake o Jira con la identidad del usuario y devuelve un resultado acotado en tokens.', flows: ['mcp>sistemas', 'sistemas>mcp', 'mcp>goose'] },
+    { title: '6 · Adopción por pares', body: 'DevRel enseña y difunde casos reales. Block atribuye la adopción más a historias de colegas que a mandatos.', flows: ['devrel>empleado'] },
+  ],
+}
+
+export const cpiCloudflare: IsoSpec = {
+  id: 'cpi-cloudflare',
+  title: 'Cloudflare: Access → proxy Worker → AI Gateway, y MCP tras un portal',
+  summary:
+    'Reconstrucción a partir del post de Cloudflare del 20 de abril de 2026 (no es un diagrama oficial). Todo el tráfico de IA pasa por **identidad Zero Trust** y un **único proxy** que inyecta las claves de proveedor; las herramientas se agrupan tras un **portal MCP** con un solo OAuth y *Code Mode*.',
+  height: 540,
+  zones: [{ id: 'mod', label: 'Modelos', from: [8.6, -7.0], to: [12.2, -0.2], tone: 'model' }],
+  nodes: [
+    { id: 'dev', label: 'Ingeniero', sub: 'OpenCode · Windsurf', at: [0, 0], shape: 'person', tone: 'user', icon: 'user', info: '3.683 usuarios activos en 30 días (60 % de ~6.100 empleados, 93 % de R&D), según Cloudflare (abril de 2026). Un `opencode auth login` configura proveedores, MCP y permisos.' },
+    { id: 'access', label: 'Cloudflare Access', sub: 'Zero Trust · JWT', at: [3.4, 0], shape: 'hex', tone: 'guard', icon: 'lock', info: 'Autenticación y política Zero Trust delante de todo: modelos y herramientas.' },
+    { id: 'proxy', label: 'Proxy Worker', sub: 'claves del lado servidor', at: [3.4, -3.4], shape: 'box', tone: 'gateway', icon: 'key', info: 'Valida el JWT de Access, inyecta las claves de proveedor (ninguna vive en laptops) y envía al gateway solo un UUID anónimo para atribuir costo por usuario.' },
+    { id: 'aigw', label: 'AI Gateway', sub: '20 M req · 30 días', at: [6.8, -3.4], shape: 'hex', tone: 'gateway', icon: 'router', info: 'Ruteo, observabilidad y control de costo. 241,37 mil millones de tokens en 30 días (auto-reportado, abril de 2026).' },
+    { id: 'frontier', label: 'Laboratorios frontera', sub: '91 % de requests', at: [10.6, -5.4], shape: 'sphere', tone: 'model', icon: 'brain', info: 'La mayoría del trabajo agéntico complejo sigue en modelos frontera de terceros.' },
+    { id: 'wai', label: 'Workers AI', sub: 'Kimi K2.5 · 9 %', at: [10.2, -1.8], shape: 'sphere', tone: 'model', icon: 'cpu', info: 'Modelos abiertos en la red propia, para tareas donde costo y latencia pesan más que la capacidad máxima (p. ej. un agente de seguridad de >7 mil millones de tokens/día).' },
+    { id: 'portal', label: 'MCP Server Portal', sub: 'un OAuth · Code Mode', at: [6.8, 0], shape: 'hex', tone: 'protocol', icon: 'plug', info: 'Agrupa los servidores MCP tras un solo flujo OAuth. *Code Mode* colapsa las definiciones en dos tools para no gastar contexto: solo las 34 tools de GitLab costaban ~15.000 tokens por request.' },
+    { id: 'mcps', label: 'Servidores MCP', sub: '13 · 182+ tools', at: [10.2, 1.6], shape: 'tall', tone: 'tool', icon: 'wrench', info: 'Servidores internos construidos con Agents SDK y workers-oauth-provider, detrás de Access.' },
+    { id: 'ctx', label: 'Contexto del repo', sub: 'AGENTS.md · Backstage', at: [3.4, 3.4], shape: 'doc', tone: 'data', icon: 'book', info: 'AGENTS.md generado en ~3.900 repos (revisado por los dueños vía MR) y Backstage como catálogo de servicios, APIs y equipos.' },
+    { id: 'review', label: 'AI Code Reviewer', sub: 'GitLab CI · por riesgo', at: [0, 3.4], shape: 'tall', tone: 'agent', icon: 'check', info: 'Un coordinador clasifica cada MR por nivel de riesgo y delega en revisores especializados (seguridad, calidad, docs, rendimiento). También usa el AI Gateway.' },
+  ],
+  edges: [
+    { from: 'dev', to: 'access' },
+    { from: 'access', to: 'proxy' },
+    { from: 'proxy', to: 'aigw' },
+    { from: 'aigw', to: 'frontier', route: 'z' },
+    { from: 'aigw', to: 'wai', route: 'z' },
+    { from: 'access', to: 'portal' },
+    { from: 'portal', to: 'mcps' },
+    { from: 'dev', to: 'ctx', dashed: true },
+    { from: 'review', to: 'aigw', route: 'arc' },
+  ],
+  steps: [
+    { title: '1 · Identidad primero', body: 'El cliente de código se autentica contra Access. El mismo login trae la configuración de proveedores, servidores MCP y permisos.', flows: ['dev>access'] },
+    { title: '2 · Un único proxy', body: 'El Worker valida el JWT, añade la clave del proveedor y reemplaza la identidad por un UUID. Cambiar de modelo o de proveedor no toca la configuración de los clientes.', flows: ['access>proxy', 'proxy>aigw'] },
+    { title: '3 · Elegir modelo', body: 'El gateway envía la mayoría del tráfico a modelos frontera y una parte a Workers AI cuando el costo manda.', flows: ['aigw>frontier', 'aigw>wai'] },
+    { title: '4 · Herramientas tras el portal', body: 'Las tools internas se descubren y llaman a través del portal MCP con un solo OAuth. *Code Mode* evita cargar cientos de esquemas en el contexto.', flows: ['access>portal', 'portal>mcps', 'mcps>portal'] },
+    { title: '5 · Contexto local', body: 'Sin saber cómo se compila y prueba cada repo, las salidas eran plausibles pero incorrectas. AGENTS.md y Backstage aportan ese contexto.', flows: ['dev>ctx'] },
+    { title: '6 · Enforcement en CI', body: 'El revisor automático corre en cada MR del pipeline estándar y consume el mismo gateway, con su costo atribuido.', flows: ['review>aigw'] },
+  ],
+}
+
+export const cpiTelekomLmos: IsoSpec = {
+  id: 'cpi-telekom-lmos',
+  title: 'Deutsche Telekom: LMOS, agentes como recursos de Kubernetes',
+  summary:
+    'Reconstrucción a partir de InfoQ (febrero de 2025) y la documentación de Eclipse LMOS (no es un diagrama oficial). Cada agente es un microservicio de un dominio; el **LMOS Operator** los registra como recursos `Agent` y resuelve qué agentes forman cada `Channel`; el **router** elige el agente por capacidades.',
+  height: 540,
+  zones: [{ id: 'k8s', label: 'Kubernetes + Istio', from: [1.8, -5.0], to: [11.8, 5.0], tone: 'infra' }],
+  nodes: [
+    { id: 'cliente', label: 'Cliente', sub: 'chat · voz · ~10 países', at: [0, 0], shape: 'person', tone: 'user', icon: 'user', info: 'Clientes de Frag Magenta en las filiales europeas, en varios idiomas y canales.' },
+    { id: 'canal', label: 'Channel', sub: 'Frag Magenta OneBOT', at: [3.4, 0], shape: 'box', tone: 'protocol', icon: 'message', info: 'Un `Channel` agrupa agentes por tenant o tarea y declara las capacidades que necesita, con restricción de versión (p. ej. `>=1.0.0`).' },
+    { id: 'router', label: 'LMOS Router', sub: 'elige por capacidad', at: [6.8, 0], shape: 'diamond', tone: 'gateway', icon: 'split', info: 'Usa los metadatos de los agentes (capacidades, ejemplos) para enviar cada consulta al agente más adecuado.' },
+    { id: 'operator', label: 'LMOS Operator', sub: 'CRDs Agent · Channel', at: [6.8, -3.4], shape: 'box', tone: 'infra', icon: 'layers', info: 'Al instalar un agente, guarda su descripción y crea un recurso `Agent`. Al aplicar un `Channel`, resuelve capacidades y genera un `ChannelRouting`. Si falta una capacidad, el channel no se activa.' },
+    { id: 'registry', label: 'Registro de agentes', sub: 'Thing Description (WoT)', at: [3.4, -3.4], shape: 'cylinder', tone: 'data', icon: 'database', info: 'Metadatos de cada agente basados en la Thing Description del W3C Web of Things.' },
+    { id: 'billing', label: 'Agente facturación', sub: 'ARC · Kotlin', at: [10.2, -3.4], shape: 'tall', tone: 'agent', icon: 'bot', info: 'Primer agente con tool calling (febrero de 2024). Un dominio por agente limita el radio de impacto de un prompt roto.' },
+    { id: 'contrato', label: 'Agente contratos', sub: 'microservicio aislado', at: [10.2, 0], shape: 'tall', tone: 'agent', icon: 'bot', info: 'Agentes de dominio que pasaron de 2 meses a 10 días de desarrollo, según los autores (febrero de 2025).' },
+    { id: 'nonarc', label: 'Agente no-ARC', sub: 'Python · LangChain', at: [10.2, 3.4], shape: 'tall', tone: 'agent', icon: 'bot', info: 'La plataforma acepta agentes en otros frameworks si cumplen sus especificaciones.' },
+    { id: 'search', label: 'Search API', sub: 'RAG fuera del agente', at: [6.8, 3.4], shape: 'stack', tone: 'data', icon: 'search', info: 'Los pipelines de RAG viven en una API de búsqueda compartida, no dentro de cada agente.' },
+  ],
+  edges: [
+    { from: 'cliente', to: 'canal' },
+    { from: 'canal', to: 'router' },
+    { from: 'router', to: 'billing', route: 'z' },
+    { from: 'router', to: 'contrato' },
+    { from: 'router', to: 'nonarc', route: 'z' },
+    { from: 'operator', to: 'registry' },
+    { from: 'operator', to: 'router', dashed: true },
+    { from: 'contrato', to: 'search', route: 'arc' },
+  ],
+  steps: [
+    { title: '1 · Instalar un agente', body: 'Al desplegar el agente de facturación, el operator guarda su descripción en el registro y crea un recurso `Agent` en Kubernetes.', flows: ['operator>registry'], focus: ['operator', 'registry', 'billing'] },
+    { title: '2 · Resolver el channel', body: 'El channel declara qué capacidades necesita. El operator busca agentes que las cumplan en la versión pedida y genera el `ChannelRouting` para el router.', flows: ['registry>operator', 'operator>router'] },
+    { title: '3 · Consulta del cliente', body: 'Un cliente pregunta por un cobro en su factura. Entra por el channel de su país y canal.', flows: ['cliente>canal', 'canal>router'] },
+    { title: '4 · Ruteo por capacidad', body: 'El router elige el agente de facturación. Cada dominio es un microservicio aislado con su propio ciclo de releases.', flows: ['router>billing', 'billing>router'] },
+    { title: '5 · Conocimiento compartido', body: 'Los agentes consultan la Search API para RAG; el conocimiento no se duplica en cada agente.', flows: ['contrato>search', 'search>contrato'] },
+    { title: '6 · Rollout y rollback', body: 'Versionado de capacidades y canales permite liberar o revertir un agente sin tocar los demás. Aun así, el ritmo quedó limitado a ~2 agentes por semana por pruebas y seguridad.', focus: ['operator', 'billing', 'contrato', 'nonarc'] },
+  ],
+}
+
+export const cpiLinkedin: IsoSpec = {
+  id: 'cpi-linkedin',
+  title: 'LinkedIn: la mensajería como orquestador de agentes',
+  summary:
+    'Reconstrucción a partir del post de LinkedIn Engineering del 10 de septiembre de 2025 (no es un diagrama oficial). En vez de un orquestador nuevo, LinkedIn reutilizó su **sistema de mensajería** (orden, historial, reintentos) y puso un **agent lifecycle service** que traduce mensajes a llamadas gRPC hacia los agentes.',
+  height: 520,
+  nodes: [
+    { id: 'usuario', label: 'Usuario', sub: 'producto LinkedIn', at: [0, 0], shape: 'person', tone: 'user', icon: 'user', info: 'Por ejemplo, un reclutador usando Hiring Assistant, el primer agente en producción sobre esta plataforma.' },
+    { id: 'front', label: 'Frontend API', sub: 'librería compañera', at: [3.4, 0], shape: 'box', tone: 'infra', icon: 'server', info: 'Expone endpoints de mensajería, recuperación de respuestas y autorización. Las librerías cliente manejan streaming, sincronización entre dispositivos y fallbacks.' },
+    { id: 'msg', label: 'Mensajería', sub: 'FIFO · historial · retries', at: [6.8, 0], shape: 'cylinder', tone: 'data', icon: 'message', info: 'El mismo sistema que mueve los mensajes de LinkedIn: persiste, ordena y reintenta la entrega (online y nearline).' },
+    { id: 'life', label: 'Agent lifecycle', sub: 'mensajes ↔ gRPC', at: [6.6, -3.0], shape: 'hex', tone: 'gateway', icon: 'repeat', info: 'Servicio central que crea, actualiza y recupera mensajes e invoca el endpoint RPC del agente correcto. Los desarrolladores no tocan la mensajería directamente.' },
+    { id: 'skills', label: 'Skill registry', sub: 'hacia MCP y A2A', at: [3.4, -3.4], shape: 'stack', tone: 'protocol', icon: 'list', info: 'Registro de agentes y skills con su metadata e invocación. LinkedIn dijo estar migrando de este registro propietario hacia protocolos abiertos.' },
+    { id: 'super', label: 'Supervisor', sub: 'gRPC · LangGraph', at: [10.4, -3.4], shape: 'tall', tone: 'agent', icon: 'bot', info: 'Los agentes se definen como servicios gRPC con opciones proto3 de la plataforma y se registran con un plugin de build.' },
+    { id: 'subag', label: 'Subagentes', sub: 'tools internas', at: [10.2, 0], shape: 'tall', tone: 'agent', icon: 'boxes', info: 'Especialistas que el supervisor coordina; acceden a servicios de LinkedIn mediante tool calling.' },
+    { id: 'mem', label: 'Memoria', sub: 'experiencial + diálogo', at: [10.2, 3.4], shape: 'cylinder', tone: 'memory', icon: 'brain', info: 'Memoria experiencial (hechos, preferencias) y conversacional, separadas por diseño.' },
+    { id: 'obs', label: 'OTel + evaluación', sub: 'LangSmith en pre-prod', at: [6.8, 3.4], shape: 'box', tone: 'infra', icon: 'chart', info: 'LangSmith para trazas y evals antes de producción; OpenTelemetry en producción. Las trazas alimentan evaluación offline y pruebas de regresión.' },
+  ],
+  edges: [
+    { from: 'usuario', to: 'front' },
+    { from: 'front', to: 'msg' },
+    { from: 'msg', to: 'life', route: 'z' },
+    { from: 'life', to: 'super' },
+    { from: 'super', to: 'skills', route: 'arc' },
+    { from: 'super', to: 'subag', route: 'z' },
+    { from: 'subag', to: 'mem', route: 'z' },
+    { from: 'subag', to: 'obs', dashed: true },
+  ],
+  steps: [
+    { title: '1 · El pedido es un mensaje', body: 'La solicitud del usuario entra como mensaje y queda persistida con orden y historial.', flows: ['usuario>front', 'front>msg'] },
+    { title: '2 · Entrega al agente', body: 'El lifecycle service toma el mensaje e invoca el endpoint gRPC del agente. Si la entrega falla, la mensajería reintenta.', flows: ['msg>life', 'life>super'] },
+    { title: '3 · Descubrir skills', body: 'El supervisor consulta el registro para saber qué agentes y skills existen y cómo invocarlos.', flows: ['super>skills', 'skills>super'] },
+    { title: '4 · Delegar y recordar', body: 'Los subagentes ejecutan con herramientas internas y leen/escriben memoria experiencial o conversacional.', flows: ['super>subag', 'subag>mem'] },
+    { title: '5 · Respuesta incremental', body: 'Las respuestas vuelven como mensajes y el cliente las recibe en streaming. Para casos interactivos se añadió un modo síncrono.', flows: ['subag>super', 'super>life', 'life>msg', 'msg>front', 'front>usuario'] },
+    { title: '6 · Trazas a evaluación', body: 'Las trazas OTel de producción alimentan evaluaciones offline y regresiones antes del siguiente cambio de prompt.', flows: ['subag>obs'] },
+  ],
+}
+
+export const cpiBlueprint: IsoSpec = {
+  id: 'cpi-blueprint',
+  title: 'Blueprint de plataforma interna de agentes (síntesis)',
+  summary:
+    '**Síntesis propia** de los cinco casos, no la arquitectura de ninguna empresa. Mapeada al stack ADK + AI gateway + Bedrock: un camino pavimentado para crear agentes, un **AI gateway** y un **gateway MCP** como únicos caminos hacia modelos y sistemas, **identidad por agente**, un **registro de agentes**, y trazas + evaluaciones como contrato para pasar a producción.',
+  height: 560,
+  nodes: [
+    { id: 'equipos', label: 'Equipos de producto', sub: 'ADK · Strands · LangGraph', at: [0, 0], shape: 'person', tone: 'user', icon: 'users', info: 'Cientos de equipos con frameworks distintos. La plataforma no les impone uno: les impone los caminos hacia modelos, herramientas e identidad.' },
+    { id: 'golden', label: 'Portal / CLI', sub: 'plantillas · golden path', at: [0, -3.4], shape: 'box', tone: 'neutral', icon: 'terminal', info: 'Como el `aifx` de Uber o el login de OpenCode en Cloudflare: un comando deja el agente o el cliente con gateway, MCP y permisos configurados.' },
+    { id: 'runtime', label: 'Runtime de agentes', sub: 'AgentCore · K8s', at: [3.4, 0], shape: 'tall', tone: 'agent', icon: 'bot', info: 'AgentCore Runtime, Kubernetes (como LMOS) o el laptop del empleado (como goose). Lo importante: aislamiento por sesión y despliegue versionado con rollback.' },
+    { id: 'catalog', label: 'Registro de agentes', sub: 'dueño · versión · A2A', at: [3.4, -3.4], shape: 'stack', tone: 'data', icon: 'list', info: 'Qué agentes existen, quién es dueño, qué capacidades ofrece y qué versión está activa. Equivale al skill registry de LinkedIn o a los recursos `Agent` de LMOS.' },
+    { id: 'idp', label: 'Identidad', sub: 'IdP · OAuth · por agente', at: [3.4, 3.4], shape: 'hex', tone: 'guard', icon: 'key', info: 'Cada agente con identidad propia y, cuando actúa por alguien, con el token del usuario. Sin secretos en el código ni en laptops.' },
+    { id: 'llmgw', label: 'AI gateway', sub: 'claves · presupuestos', at: [6.8, -3.4], shape: 'hex', tone: 'gateway', icon: 'router', info: 'LiteLLM o AgentCore Gateway: API compatible OpenAI, claves por equipo, presupuestos, redacción de PII y atribución de costo. Uber lo tenía en 2024, antes que los agentes.' },
+    { id: 'mcpgw', label: 'Gateway MCP', sub: 'registro · política', at: [6.8, 0], shape: 'hex', tone: 'protocol', icon: 'plug', info: 'Registro de servidores y tools con dueño, habilitación explícita, autorización por tool, redacción de respuestas y descubrimiento incremental para no saturar contexto.' },
+    { id: 'obs', label: 'Trazas y evals', sub: 'OTel · set dorado · costo', at: [6.8, 3.4], shape: 'box', tone: 'infra', icon: 'chart', info: 'OpenTelemetry de punta a punta, costo por equipo/agente y evaluaciones offline y online como gate de promoción.' },
+    { id: 'modelos', label: 'Modelos', sub: 'Bedrock · Gemini', at: [10.8, -4.5], shape: 'sphere', tone: 'model', icon: 'brain', info: 'Varios proveedores detrás de un alias. Cloudflare manda ~9 % del tráfico a modelos abiertos propios por costo.' },
+    { id: 'sistemas', label: 'Sistemas internos', sub: 'APIs · IDL · SaaS', at: [10.2, 0], shape: 'box', tone: 'tool', icon: 'server', info: 'Lo más rápido es convertir las APIs que ya existen (IDL, OpenAPI) en tools, como hizo Uber, en vez de escribir un servidor por sistema.' },
+    { id: 'gob', label: 'Gobierno', sub: 'revisión · allowlist', at: [10.2, 3.4], shape: 'diamond', tone: 'guard', icon: 'shield', info: 'Revisión de seguridad de servidores MCP, allowlist, detección de "shadow MCP", anotación de riesgo por tool y límites de release.' },
+  ],
+  edges: [
+    { from: 'golden', to: 'equipos' },
+    { from: 'equipos', to: 'runtime' },
+    { from: 'runtime', to: 'catalog' },
+    { from: 'runtime', to: 'idp', route: 'z' },
+    { from: 'runtime', to: 'llmgw', route: 'z' },
+    { from: 'runtime', to: 'mcpgw' },
+    { from: 'llmgw', to: 'modelos' },
+    { from: 'mcpgw', to: 'sistemas' },
+    { from: 'runtime', to: 'obs', route: 'arc', dashed: true },
+    { from: 'gob', to: 'mcpgw', route: 'z', dashed: true },
+  ],
+  steps: [
+    { title: '1 · Camino pavimentado', body: 'Un equipo crea un agente desde una plantilla o un comando. Hereda gateway, MCP, identidad y telemetría sin configurarlos a mano.', flows: ['golden>equipos', 'equipos>runtime'] },
+    { title: '2 · Registrar el agente', body: 'El agente queda en el registro con dueño, versión y capacidades. Otros agentes lo pueden descubrir (y, si aplica, invocar por A2A).', flows: ['runtime>catalog'] },
+    { title: '3 · Identidad propia', body: 'El agente obtiene su token del IdP; si actúa en nombre de una persona, propaga su identidad.', flows: ['runtime>idp', 'idp>runtime'] },
+    { title: '4 · Modelos por un solo camino', body: 'Toda inferencia pasa por el AI gateway: clave del equipo, presupuesto, PII y costo atribuido.', flows: ['runtime>llmgw', 'llmgw>modelos'] },
+    { title: '5 · Herramientas gobernadas', body: 'Las tools salen del registro MCP: solo las habilitadas por su dueño y permitidas para esa identidad.', flows: ['runtime>mcpgw', 'mcpgw>sistemas'] },
+    { title: '6 · Gobierno de servidores', body: 'Cada servidor nuevo pasa revisión, declara el riesgo de sus tools y queda en allowlist. Lo que no está registrado se detecta y bloquea.', flows: ['gob>mcpgw'] },
+    { title: '7 · Medir para promover', body: 'Trazas, costo y evaluaciones deciden si una versión pasa a producción o se revierte.', flows: ['runtime>obs'] },
+  ],
+}

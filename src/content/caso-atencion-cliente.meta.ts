@@ -1,0 +1,35 @@
+import type { PostMeta } from '../lib/content'
+
+export const meta: PostMeta = {
+  slug: 'caso-atencion-cliente',
+  title: 'Caso real: agentes de atención al cliente a gran escala (Klarna, Intercom, DoorDash, Salesforce)',
+  description:
+    'Cuatro despliegues de agentes de soporte con millones de conversaciones: el asistente de Klarna y su giro al modelo híbrido, el pipeline de Intercom Fin con modelos propios y precio por resolución, los guardrails, jueces y simulación de DoorDash (con Bedrock en voz) y Agentforce en Salesforce Help. Cifras fechadas, quién las reporta, retrocesos y lecciones aplicables.',
+  section: 'casos',
+  order: 2,
+  readingMinutes: 22,
+  level: 'intermedio',
+  tags: ['soporte', 'atención al cliente', 'Klarna', 'Intercom Fin', 'DoorDash', 'Salesforce Agentforce', 'guardrails', 'evals', 'Bedrock'],
+  references: [
+    { title: 'Klarna AI assistant handles two-thirds of customer service chats in its first month', url: 'https://www.klarna.com/international/press/klarna-ai-assistant-handles-two-thirds-of-customer-service-chats-in-its-first-month/', org: 'Klarna', date: '2024-02-27' },
+    { title: 'Caso de cliente: el asistente de Klarna con LangGraph y LangSmith', url: 'https://www.langchain.com/blog/customers-klarna', org: 'LangChain', date: '2025-02-12' },
+    { title: 'Klarna vuelve a invertir en agentes humanos (cita entrevista de Bloomberg)', url: 'https://www.customerexperiencedive.com/news/klarna-reinvests-human-talent-customer-service-AI-chatbot/747586/', org: 'CX Dive', date: '2025-05-09' },
+    { title: 'Klarna Q3 2025 earnings call (transcripción)', url: 'https://tickertrends.io/transcripts/KLAR/Q3-earnings-transcript-2025', org: 'Klarna', date: '2025-11-18' },
+    { title: 'Klarna busca un modelo de atención humana tipo Uber (podcast 20VC)', url: 'https://www.customerexperiencedive.com/news/klarna-pursues-uber-style-customer-service-model/812763/', org: 'CX Dive', date: '2026-02-20' },
+    { title: 'Fin AI Engine: cómo funciona Fin', url: 'https://fin.ai/ai-engine', org: 'Intercom' },
+    { title: 'How we built a world-class reranker for Fin', url: 'https://fin.ai/research/how-we-built-a-world-class-reranker-for-fin/', org: 'Intercom', date: '2025-09-11' },
+    { title: 'Intercom + Anthropic en Amazon Bedrock (caso de estudio)', url: 'https://aws.amazon.com/solutions/case-studies/intercom-anthropic/', org: 'AWS' },
+    { title: "Intercom's new post-trained Fin Apex 1.0 beats GPT-5.4 and Claude Sonnet 4.6", url: 'https://venturebeat.com/technology/intercoms-new-post-trained-fin-apex-1-0-beats-gpt-5-4-and-claude-sonnet-4-6', org: 'VentureBeat', date: '2026-03-26' },
+    { title: 'Path to high-quality LLM-based Dasher support automation', url: 'https://careersatdoordash.com/blog/large-language-modules-based-dasher-support-automation/', org: 'DoorDash Engineering', date: '2024-09-17' },
+    { title: 'DoorDash: autoservicio por voz con Amazon Bedrock y Claude (caso de estudio)', url: 'https://aws.amazon.com/solutions/case-studies/doordash-bedrock-case-study/', org: 'AWS' },
+    { title: 'A simulation and evaluation flywheel to develop LLM chatbots at scale', url: 'https://careersatdoordash.com/blog/doordash-simulation-evaluation-flywheel-to-develop-llm-chatbots-at-scale/', org: 'DoorDash Engineering', date: '2026-01-26' },
+    { title: 'Agentforce en Salesforce Help: Salesforce como Customer Zero', url: 'https://www.salesforce.com/news/stories/agentforce-customer-zero/', org: 'Salesforce', date: '2025-01-16' },
+    { title: "Salesforce used AI to cut support load by 5% — but the real win was teaching bots to say 'I'm sorry'", url: 'https://venturebeat.com/ai/salesforce-used-ai-to-cut-support-load-by-5-but-the-real-win-was-teaching-bots-to-say-im-sorry/', org: 'VentureBeat', date: '2025-07-18' },
+    { title: 'Cómo Agentforce atiende las solicitudes de soporte de Salesforce (Jim Roth)', url: 'https://www.salesforce.com/blog/support-requests-agentforce/', org: 'Salesforce', date: '2025-11-06' },
+    { title: 'Agentforce Customer Zero: métricas de Salesforce Help', url: 'https://www.salesforce.com/ap/agentforce/use-cases/customer-zero/', org: 'Salesforce' },
+    { title: 'Benioff: el equipo de soporte de Salesforce pasó de ~9.000 a ~5.000 personas', url: 'https://www.itpro.com/technology/artificial-intelligence/marc-benioff-says-salesforce-has-already-cut-4-000-customer-support-staff-for-ai-agents-and-workforce-productivity-hasnt-dipped', org: 'ITPro', date: '2025-09' },
+    { title: 'Lyft to bring Claude to more than 40 million riders and over 1 million drivers', url: 'https://www.anthropic.com/news/lyft-announcement', org: 'Anthropic', date: '2025-02-06' },
+    { title: "Lyft's new AI customer assistant is powered by Anthropic's Claude", url: 'https://techcrunch.com/2025/02/06/lyfts-new-ai-customer-assistant-is-powered-by-anthropics-claude', org: 'TechCrunch', date: '2025-02-06' },
+    { title: 'AWS and Lyft: bringing agentic AI to life for riders and drivers', url: 'https://www.lyft.com/blog/posts/aws-and-lyft-bringing-agentic-ai-to-life-for-riders-and-drivers', org: 'Lyft', date: '2025-12-01' },
+  ],
+}

@@ -1,0 +1,277 @@
+Bancos, aseguradoras y agencias de rating son el mejor laboratorio para aprender a **gobernar** agentes: manejan datos sensibles, responden ante reguladores y una respuesta inventada puede convertirse en una pérdida o una sanción. Por eso lo que publican sobre sus agentes trata menos del modelo y más de los controles alrededor: evaluaciones antes de producción, trazabilidad, personas que aprueban y residencia de datos.
+
+Esta página reúne cinco casos con detalle técnico público: **Morgan Stanley**, **JPMorgan Chase**, **Moody's**, **Allianz** y **Robinhood**. Para cada uno verás contexto, escala, arquitectura publicada, cómo resuelven la gobernanza, resultados, límites y qué puedes llevarte a una arquitectura con Google ADK, un AI gateway y Amazon Bedrock. Todo está anclado a **octubre de 2026**.
+
+<Callout type="warning" title="Cómo leer las cifras de esta página">
+Casi todas las cifras son **auto-reportadas** por la empresa o por su proveedor (OpenAI, AWS). Los casos de estudio de proveedores y las sesiones de re:Invent son, en parte, marketing: muestran lo que salió bien. Ninguna cifra de esta página proviene de una auditoría independiente. Cuando un dato viene de un resumen de transcripción y no del video o de un documento oficial, lo indicamos. Los diagramas son **reconstrucciones** a partir de fuentes públicas, salvo que se diga otra cosa.
+</Callout>
+
+## Por qué mirar a la banca y a los seguros
+
+Un retailer no responde ante un supervisor bancario, pero comparte más problemas de los que parece: datos personales de clientes, pagos, devoluciones, notas de crédito, precios y promociones con impacto contable. Las industrias reguladas ya se vieron obligadas a resolver preguntas que tarde o temprano te harán a ti:
+
+- ¿Cómo sabes que el agente funciona **antes** de exponerlo a usuarios?
+- ¿Puedes reconstruir qué hizo, con qué datos y por qué?
+- ¿Qué decisiones puede tomar solo y cuáles necesitan una persona?
+- ¿Dónde se procesan los datos y quién puede ver qué?
+- ¿Qué pasa cuando cambias de modelo?
+
+Los cinco casos responden a estas preguntas de formas distintas. Ninguno publica todo, y por eso conviene leerlos juntos.
+
+## Morgan Stanley: evaluar cada caso de uso antes de desplegar
+
+### Contexto y escala
+
+Morgan Stanley Wealth Management fue de los primeros grandes bancos en poner GPT-4 en manos de sus asesores financieros. El caso de estudio de OpenAI (publicado en diciembre de 2024, material del proveedor) describe dos herramientas internas:
+
+- **AI @ Morgan Stanley Assistant**: un chatbot interno que responde preguntas de los asesores sobre la base de conocimiento de la firma (research, procesos, productos).
+- **AI @ Morgan Stanley Debrief**: convierte grabaciones de reuniones con clientes (con consentimiento) en notas que se integran al CRM y en borradores de correos de seguimiento. Usa Whisper y GPT-4.
+
+Cifras auto-reportadas en ese caso de estudio: **más del 98 % de los equipos de asesores** usa el Assistant; el acceso efectivo a documentos pasó **del 20 % al 80 %**; y, según David Wu, la firma pasó de poder responder unas 7.000 preguntas a responder prácticamente cualquiera sobre un corpus de **100.000 documentos**.
+
+### Arquitectura publicada
+
+Poca. Se sabe que es un asistente de recuperación (RAG) sobre documentos internos con modelos de OpenAI, que trabajaron con OpenAI para afinar los métodos de recuperación y que Debrief escribe en el CRM. No hay diagrama, ni detalles del índice, del chunking o de los guardrails.
+
+### Cómo resuelven la gobernanza
+
+Aquí está lo valioso del caso. La idea central es un **framework de evaluación que se aplica a cada caso de uso antes del despliegue**:
+
+- **Evals específicas por tarea.** Empezaron con evals de resumen (qué tan bien el modelo condensa el capital intelectual de la firma) y luego sumaron evals de traducción para clientes multilingües.
+- **Expertos del negocio como evaluadores.** Asesores y prompt engineers calificaron respuestas por exactitud y coherencia. El criterio de "buena respuesta" lo define quien conoce el dominio, no solo el equipo técnico.
+- **Datasets que representan la realidad.** Para Debrief construyeron datasets con distintos tipos de reunión y midieron si el modelo captura los action items sin introducir errores.
+- **Regresión diaria.** Integraron QA en el framework con una suite de preguntas de muestra que se corre **todos los días** para detectar debilidades y salidas no conformes.
+- **Humano en el loop en lo que sale de la firma.** En Debrief, el asesor revisa y ajusta las notas y correos antes de finalizarlos.
+- **Retención de datos.** La política de *zero data retention* de OpenAI fue clave para responder la primera pregunta que hacía todo el mundo: si los datos se usarían para entrenar modelos públicos.
+
+### Resultados y límites
+
+Los resultados son de adopción (98 %) y de acceso a documentos, no de calidad medida externamente. No se publican tasas de error, umbrales de los evals ni qué pasa cuando el Assistant no sabe la respuesta. El caso tampoco describe agentes que ejecuten acciones: Assistant y Debrief preparan información y borradores, y una persona actúa.
+
+### Qué puedes aplicar
+
+La lección es organizativa: **ningún caso de uso pasa a producción sin su batería de evals**, y esa batería la escriben expertos del negocio. En tu stack, eso significa un set dorado por agente en el repositorio, un gate de CI con AgentCore Evaluations o tu propio runner, y una regresión programada contra producción. Lo desarrollamos en [Evaluación y observabilidad](/guia/evaluacion-observabilidad).
+
+Robinhood llegó a un patrón muy parecido por otro camino (lo verás más abajo). Este diagrama sintetiza lo que publican ambos:
+
+<Diagram id="csf-evals-gate" height={540} />
+
+## JPMorgan Chase: una plataforma de IA para toda la empresa
+
+### Contexto y escala
+
+JPMorgan no permite que sus empleados usen chatbots de consumo de terceros para trabajar. Su respuesta fue **LLM Suite**, una plataforma propia lanzada en el verano de 2024. Según el blog de tecnología del banco (junio de 2025), pasó **de cero a 200.000 usuarios en ocho meses**. En una entrevista con CNBC (30 de septiembre de 2025), el Chief Analytics Officer Derek Waldron dijo que unos **250.000 empleados** tienen acceso (toda la plantilla salvo sucursales y call center) y que **la mitad lo usa aproximadamente a diario**. Son cifras del banco.
+
+### Arquitectura publicada
+
+LLM Suite es un **portal** construido por el banco para usar modelos de proveedores externos; CNBC menciona a OpenAI y Anthropic. El dato más interesante es la cadencia: la plataforma se actualiza **cada ocho semanas** a medida que se conecta a más bases de datos y aplicaciones de los negocios. En la demo a CNBC generó un deck de banca de inversión de cinco páginas en unos 30 segundos.
+
+Según una hoja de ruta interna que el banco entregó a CNBC, JPMorgan empezó a desplegar **IA agéntica** para tareas multipaso de empleados, y planea abrir la IA generativa a clientes empezando por casos limitados. El blog del banco describe la evolución como integrar más fuentes de datos internas y combinar IA generativa con workflows para crear agentes que ejecuten series de acciones hacia un objetivo.
+
+### Cómo resuelven la gobernanza
+
+JPMorgan no publica cómo implementa los controles dentro de LLM Suite (guardrails, logging, permisos por fuente de datos). Lo que sí se desprende de lo publicado es una decisión de gobernanza de primer orden: **un único punto de acceso** a modelos, controlado por el banco, en lugar de cientos de equipos contratando herramientas por su cuenta. Es la misma lógica de un AI gateway corporativo.
+
+<Diagram id="csf-plataforma" height={520} />
+
+### Resultados y límites
+
+Las métricas públicas son de alcance y uso, no de calidad ni de impacto financiero verificable. Waldron reconoce una "brecha de valor" entre lo que la tecnología puede hacer y lo que la empresa logra capturar, porque cada aplicación interna hay que conectarla al ecosistema de IA. Las cifras de 2026 que circulan en medios secundarios (usuarios, permisos escalonados para agentes) no pudimos verificarlas en fuentes del banco y no las usamos.
+
+### Qué puedes aplicar
+
+Si tu empresa ya tiene un AI gateway, tienes la pieza central del patrón. Lo que JPMorgan agrega es **producto**: un portal que los empleados prefieren a las alternativas no autorizadas y una cadencia fija de nuevas conexiones a datos internos. En tu arquitectura, LiteLLM Proxy (o el gateway que uses) es el punto único hacia los modelos, y AgentCore Gateway el punto único hacia las herramientas. Ver [Gateways](/guia/gateways) y la [arquitectura de referencia ADK + gateway + Bedrock](/guia/arquitectura-adk-gateway-bedrock).
+
+## Moody's: sistema multiagente para análisis crediticio en AWS
+
+### Contexto y escala
+
+Moody's vende datos, ratings y análisis de riesgo a bancos, gestores de activos y aseguradoras. En la sesión **IND3303 de AWS re:Invent 2025**, Dennis Clement (Moody's) y Samuel Baruffi (AWS) contaron cómo pasaron de un chatbot RAG básico a un sistema multiagente en producción. Los datos de esta sección provienen de esa sesión, consultada a través de resúmenes basados en la transcripción; conviene verificarlos en el video.
+
+Hitos y cifras de la sesión (auto-reportados):
+
+- **Research Assistant** lanzado en diciembre de 2023; carga de PDFs en agosto de 2024.
+- **~80 herramientas**, **más de 100 workflows** y **más de 1 millón de tokens al día**.
+- Workflows que empezaron con unos 20 pasos y hoy llegan a **~400 pasos** en algunos clientes.
+- Picos de demanda de hasta **~50x** durante eventos crediticios.
+- Para el Research Assistant: **60 % más rápido** para obtener insights y **30 % menos** tiempo por tarea.
+
+En paralelo, Moody's lanzó comercialmente **Moody's Agentic Solutions** (septiembre de 2025) y, en abril de 2026, publicó su workflow **MAS Credit Memo** en AWS Marketplace, con salidas que describe como "explicables y trazables a los datos fuente".
+
+### Arquitectura publicada
+
+Es el caso con más detalle técnico de esta página:
+
+<Diagram id="csf-moodys" height={560} />
+
+Las decisiones que vale la pena retener:
+
+- **Workflow determinista por fuera, agentes por dentro.** Clement definió un agente como "un for-loop con mejor PR". El cliente no conversa con un agente libre: ejecuta un workflow predefinido donde algunos pasos son agentes. Esa separación entre workflow y agente es la misma de [Patrones de diseño](/guia/patrones-de-diseno).
+- **Agentes como configuración.** Los agentes simples son JSON (prompt, herramientas, validaciones); los complejos, código en ECS. Un agente nuevo no siempre requiere un despliegue.
+- **Herramientas pequeñas en Lambda.** Funciones de propósito único, stateless, compartidas entre workflows.
+- **Ingesta según el tipo de contenido.** Probaron cuatro enfoques que fallaron (librerías de extracción, bounding boxes, modelos multimodales y meter el documento completo en un contexto de un millón de tokens). Lo que funcionó fue clasificar cada página y enrutar: texto a un LLM, tablas a **Bedrock Data Automation**, gráficos a un modelo de visión.
+- **Recuperación agéntica con citas.** En vez de un top-K único, el sistema descompone la pregunta, busca varias veces, evalúa si ya puede responder y devuelve fragmentos citables.
+- **Modelo por paso.** Cada paso declara su modelo; la lección explícita fue no casarse con uno solo.
+
+### Cómo resuelven la gobernanza
+
+- **Citas como requisito de producto**: es lo que permite a un analista verificar cada afirmación.
+- **Residencia de datos** con inferencia entre regiones **geográfica** de Bedrock (UE o EE. UU.); la global se usa cuando solo importa la capacidad.
+- **Aislamiento de datos** para clientes regulados y para documentos que suben los usuarios.
+- **Trazabilidad paso a paso**: en la sesión, AgentCore Observability e Identity aparecían **en evaluación** para registrar cada paso, llamada al modelo y tool call. No asumas que ya estaban en producción.
+
+### Resultados y límites
+
+Las cifras de velocidad son de la empresa y no vienen acompañadas de métricas de exactitud. La sesión menciona un objetivo de 99 % de exactitud para decisiones de alto impacto, pero no muestra cómo se mide ni si se alcanza. La evaluación aparece mencionada sin metodología. Una cifra muy citada en prensa ("memo de crédito de 40 horas a 2 minutos") no aparece en los comunicados que pudimos leer: trátala como no verificada.
+
+### Qué puedes aplicar
+
+Para agentes que trabajan sobre documentos (contratos con proveedores, fichas técnicas, manuales de tienda), copia tres cosas: **clasificar antes de extraer**, **exponer la recuperación como herramienta con citas** y **definir workflows deterministas que invocan agentes acotados**. En Bedrock, el equivalente directo es Knowledge Bases + Data Automation, herramientas detrás de AgentCore Gateway y perfiles de inferencia geográficos cuando hay requisitos de residencia (ver [AWS Bedrock y AgentCore](/guia/aws-bedrock-agentcore)).
+
+## Allianz: siete agentes y una persona que decide
+
+### Contexto y escala
+
+**Project Nemo** es el primer sistema agéntico integrado de Allianz. Se lanzó en Australia en julio de 2025 y, según la compañía, estuvo en producción en **menos de 100 días**. Atiende un tipo de siniestro muy concreto: **alimentos echados a perder** por cortes de luz tras tormentas, en reclamos de **menos de 500 dólares australianos**. Es un caso de alto volumen y baja complejidad que se dispara justo cuando una catástrofe natural satura al equipo de siniestros.
+
+### Arquitectura publicada
+
+Allianz publicó (noviembre de 2025) los siete agentes y sus roles, pero **no** los modelos ni la nube:
+
+<Diagram id="csf-allianz-nemo" height={560} />
+
+En la sesión INV209 de re:Invent 2025, el CTO de Allianz Technology, Axel Schell, presentó el mismo ejemplo de siete agentes dentro de un framework multiagente construido con AWS, sobre **Amazon Bedrock**, que usa **LangGraph**, **AWS Fargate** y mucho **MCP**. Describió tres niveles de agentes (utilitarios, de negocio y planificadores) y un **control plane** interno para descubrir, configurar, monitorear y gobernar agentes, con control de costos. Que Nemo corra exactamente sobre ese stack es probable, pero Allianz no lo confirma en su comunicado.
+
+### Cómo resuelven la gobernanza
+
+Nemo es el mejor ejemplo público de **humano en el loop bien diseñado**:
+
+- **Alcance acotado.** Un solo tipo de siniestro, monto bajo, reglas claras. La autonomía crece con el caso de uso, no con la confianza en el modelo.
+- **Las decisiones de pago nunca se automatizan.** Los agentes recomiendan; un profesional de siniestros decide.
+- **Un agente de auditoría** resume lo que decidió cada uno de los otros agentes para que la revisión humana sea rápida. Sin ese resumen, la persona tendría que rehacer el trabajo.
+- **Un agente de seguridad** supervisa los datos durante el flujo, y la oficial de ciberseguridad de Allianz Australia participó en el diseño de la gobernanza desde el inicio.
+- En el framework de Allianz Technology: casos de prueba por herramienta y trazas con razonamiento, timestamps y logs de auditoría.
+
+### Resultados y límites
+
+Allianz reporta **un 80 % menos de tiempo** de procesamiento y liquidación: de varios días a aproximadamente un día, a veces horas. En su ejemplo, el flujo desde la presentación del reclamo hasta la revisión humana final tomó menos de cinco minutos. Un blog de AWS (enero de 2026) atribuye la reducción a "unos 100 días", cifra que no coincide con la de Allianz y parece confundir el tiempo de construcción con el de procesamiento; usa la versión de Allianz. No hay datos de volumen, tasa de rechazo humano ni errores.
+
+### Qué puedes aplicar
+
+Cambia "siniestro" por **devolución con nota de crédito** y tienes un caso de retail casi idéntico: verificar la compra, la política de devoluciones, señales de fraude, calcular el monto, resumir y pedir aprobación. En tu stack, el resumen del agente de auditoría es lo que muestras en la pantalla de aprobación, y la regla "el pago nunca se automatiza" se implementa como política determinista en el gateway de herramientas (Cedar en AgentCore Policy), no como instrucción en el prompt. Ver [Seguridad y gobernanza](/guia/seguridad-gobernanza).
+
+## Robinhood: evals primero, gateway propio y fine-tuning para bajar latencia
+
+### Contexto y escala
+
+Robinhood presentó en re:Invent 2025 (sesión **IND392**) cómo afina y evalúa tres productos agénticos: **Cortex Digest** (explica por qué se movió una acción), indicadores y scans de trading escritos en lenguaje natural, y un **agente de soporte** (CX). Los detalles provienen de un resumen auto-generado de la transcripción, así que verifícalos en el video antes de citarlos.
+
+### Arquitectura publicada
+
+- **Robinhood LLM Gateway**: una capa de abstracción para que los ingenieros llamen a una API sin saber qué modelo está detrás.
+- El agente de soporte tiene tres etapas: **entender la intención**, **planificar y elegir herramientas** y **generar la respuesta**. El fine-tuning se concentró en el planificador.
+- Inferencia en **Amazon Bedrock**, incluidos modelos afinados importados con Custom Model Import; entrenamiento en **SageMaker**.
+- Una hoja de ruta de ajuste en tres escalones: **prompt tuning** → **trajectory tuning** (ejemplos dorados inyectados dinámicamente desde una base vectorial) → **fine-tuning con LoRA** cuando lo anterior toca techo.
+
+### Cómo resuelven la gobernanza
+
+- **El set dorado sale de los casos escalados**: conversaciones donde el bot falló y entró un humano. El equipo de QA escribe la respuesta correcta.
+- **Métricas por etapa**: para el planificador, corrección categórica (precision, recall y F1), y elegir la herramienta equivocada cuenta como **fallo duro**.
+- **Juez LLM calibrado contra humanos**, porque los revisores humanos por sí solos eran inconsistentes.
+- **Gate de release**: un modelo solo se libera si pasa la regresión contra la línea base.
+- **Guardrails de calidad** que bloquean respuestas por debajo de un umbral; los resúmenes de Cortex Digest deben ser equilibrados y conformes.
+
+### Resultados y límites
+
+Según la transcripción, la latencia de la etapa afinada del agente de soporte bajó de **3–6 segundos a 1–2 segundos** (más del 50 %), con la misma corrección categórica que un modelo frontera con trajectory tuning. No se publicaron cifras de costo ni los modelos base. La lección metodológica es la más útil: **construye la evaluación antes de afinar**, porque sin línea base no distingues una mejora de un simple cambio.
+
+### Qué puedes aplicar
+
+Usa el escalón más barato que cumpla la barra de calidad. Para la mayoría de los equipos con ADK y Claude en Bedrock, eso significa prompt caching y trajectory tuning antes que fine-tuning. Si llegas a afinar, el modelo afinado se publica detrás del mismo alias del gateway y pasa el mismo gate de evals que cualquier cambio de prompt.
+
+## Otros casos que revisamos
+
+- **BBVA** extendió ChatGPT Enterprise a sus **120.000 empleados en 25 países** (diciembre de 2025), después de una fase con 11.000 personas donde más del 80 % lo usaba a diario y reportaba ahorrar cerca de tres horas por semana (cifras de BBVA y OpenAI). El acuerdo incluye herramientas para crear agentes internos conectados a sistemas del banco y un "alter ego" digital que ejecuta tareas con autorización y supervisión del empleado. No hay detalle público de arquitectura ni de controles más allá de "seguridad y privacidad", así que no lo tratamos como caso completo.
+- **Itaú Unibanco** lanzó un agente de inversiones (junio de 2025) y el asistente conversacional ia.i (julio de 2026), pero no encontramos detalle técnico de su arquitectura de agentes.
+- **Klarna** está en [Atención al cliente](/guia/caso-atencion-cliente), **Nubank** con Devin en [Migraciones de código](/guia/caso-migraciones-codigo) y Thomson Reuters y Harvey en [Investigación multiagente](/guia/caso-investigacion-multiagente).
+
+## Tabla comparativa
+
+| | Morgan Stanley | JPMorgan Chase | Moody's | Allianz (Nemo) | Robinhood |
+|---|---|---|---|---|---|
+| Tipo de sistema | Asistente RAG + resumen de reuniones | Plataforma multimodelo; agentes en despliegue | Workflows multiagente para clientes | 7 agentes para un tipo de siniestro | Agentes de soporte y contenido financiero |
+| Cifra principal (auto-reportada) | Más del 98 % de equipos de asesores lo usa (dic. 2024) | ~250.000 con acceso, la mitad a diario (sep. 2025) | 60 % más rápido para obtener insights (dic. 2025) | 80 % menos tiempo de liquidación (nov. 2025) | Latencia de 3–6 s a 1–2 s (dic. 2025) |
+| Stack publicado | OpenAI (GPT-4, Whisper) | Modelos de OpenAI y Anthropic tras portal propio | Bedrock, KB, Data Automation, Lambda, ECS | No publicado (framework de Allianz: Bedrock, LangGraph, MCP) | Gateway propio, Bedrock, SageMaker |
+| Evaluación antes de producción | Framework por caso de uso, expertos | No publicada | Mencionada sin detalle | Casos de prueba por herramienta | Set dorado, juez calibrado, gate |
+| Humano en el loop | El asesor revisa salidas de Debrief | "De makers a checkers" | El analista usa citas | La persona decide todo pago | QA define respuestas doradas |
+| Trazabilidad | Regresión diaria | No publicada | Citas; observabilidad en evaluación | Agente de auditoría, logs | Métricas por etapa |
+| Residencia y datos | Zero data retention | Plataforma interna | Inferencia geográfica | Agente de seguridad | No publicada |
+| Gestión de modelos | Proveedor único | Multiproveedor, release cada ~8 semanas | Modelo por paso | Agnóstico de modelo | Gateway + modelos afinados |
+| Profundidad de la fuente | Caso de proveedor | Blog del banco + prensa | Sesión técnica | Comunicado + sesión | Sesión técnica |
+
+## Lo que dice (y no dice) la regulación
+
+Dos señales de 2026 explican por qué estas empresas diseñan sus propios controles:
+
+- En **Estados Unidos**, la OCC, la Reserva Federal y la FDIC publicaron el 17 de abril de 2026 una guía revisada de riesgo de modelo que reemplaza a la histórica SR 11-7. Según el análisis de Orrick, una nota al pie **excluye de su alcance los modelos de IA generativa y agéntica** por ser "novedosos y de rápida evolución", y las agencias anunciaron una consulta aparte sobre IA. Es decir: el marco clásico de riesgo de modelo **no** te dice cómo gobernar un agente.
+- En la **Unión Europea**, el AI Act clasifica como alto riesgo la evaluación de solvencia de personas y la tarificación de seguros de vida y salud. Un acuerdo político provisional de mayo de 2026 aplazaría esas obligaciones al 2 de diciembre de 2027; confirma el estado de su adopción formal antes de planificar.
+
+Si operas en Chile u otro país de la región, revisa la normativa local de protección de datos y lo que exija tu regulador sectorial. Esta página no es asesoría legal.
+
+## Checklist de gobernanza derivada de los casos
+
+<Steps>
+
+1. **Acota el caso de uso** antes de dar autonomía: un tipo de transacción, un tope de monto, reglas claras (Allianz).
+2. **Escribe la batería de evals con expertos del negocio** antes del primer despliegue, una por caso de uso (Morgan Stanley).
+3. **Alimenta el set dorado con fallos reales**: escalamientos, rechazos humanos, quejas (Robinhood).
+4. **Calibra el juez LLM contra personas** y mide por etapa, no solo de extremo a extremo (Robinhood).
+5. **Bloquea la promoción** si el candidato empeora contra la línea base; corre regresión periódica en producción (Robinhood, Morgan Stanley).
+6. **Centraliza el acceso a modelos** en una plataforma o gateway; las aplicaciones no tienen credenciales de proveedores (JPMorgan, Robinhood).
+7. **Haz que cada respuesta sea verificable**: citas a la fuente en todo lo que se apoye en documentos (Moody's).
+8. **Separa workflow determinista y agente**: la secuencia la decide el código; el agente resuelve pasos acotados (Moody's).
+9. **Las acciones irreversibles las decide una persona**, con un resumen auditable de lo que hicieron los agentes (Allianz, Morgan Stanley).
+10. **Fija la residencia de datos en la capa de inferencia**: perfiles geográficos, sin fallback a regiones no permitidas (Moody's).
+11. **Exige retención cero o equivalente** contractual a los proveedores de modelos (Morgan Stanley).
+12. **Registra agentes en un control plane**: dueño, herramientas permitidas, costo y trazas (Allianz).
+
+</Steps>
+
+### Dónde vive cada control en ADK + gateway + Bedrock
+
+| Control | Dónde implementarlo | Página |
+|---|---|---|
+| Evals antes de producción y regresión | Set dorado en el repo, gate de CI, AgentCore Evaluations online | [Evaluación y observabilidad](/guia/evaluacion-observabilidad) |
+| Punto único hacia modelos, claves y presupuestos | LiteLLM Proxy u otro AI gateway | [Gateways](/guia/gateways) |
+| Residencia de datos | Alias del gateway con perfiles `eu.`/`us.` sin fallback a `global.` | [Arquitectura ADK + gateway + Bedrock](/guia/arquitectura-adk-gateway-bedrock) |
+| Permisos por herramienta y montos máximos | AgentCore Gateway + Policy (Cedar), Identity con OBO | [AWS Bedrock y AgentCore](/guia/aws-bedrock-agentcore) |
+| Aprobación humana | Herramienta que crea la solicitud y espera aprobación; política que deniega la ejecución directa | [Seguridad y gobernanza](/guia/seguridad-gobernanza) |
+| Trazabilidad | Spans OpenTelemetry del agente + logs del gateway → CloudWatch | [Evaluación y observabilidad](/guia/evaluacion-observabilidad) |
+| Citas | Knowledge Bases expuesta como herramienta que devuelve fuentes | [RAG](/guia/rag) |
+
+<Callout type="tip" title="Empieza por el caso más aburrido">
+Los casos que funcionan en producción en industrias reguladas tienen algo en común: empiezan donde el volumen es alto, la complejidad baja y la decisión final sigue siendo humana. Un asistente de procedimientos de tienda o un preparador de devoluciones con aprobación son mejores primeros agentes que un agente autónomo de precios.
+</Callout>
+
+<KeyPoints title="En resumen">
+
+- En industrias reguladas, lo publicable no es el modelo sino los **controles**: evals antes de producción, trazabilidad, humano en el loop y residencia de datos.
+- **Morgan Stanley** muestra el framework de evals por caso de uso, escrito con expertos del negocio y con regresión diaria.
+- **JPMorgan** muestra el valor de una **plataforma única multimodelo** que crece conectando datos internos cada ~8 semanas.
+- **Moody's** es el caso más técnico: workflows deterministas que invocan agentes declarados en JSON, herramientas en Lambda, ingesta por tipo de página, recuperación agéntica con citas e inferencia geográfica en Bedrock.
+- **Allianz Nemo** es el modelo de humano en el loop: siete agentes preparan, un agente de auditoría resume y una persona decide todo pago.
+- **Robinhood** enseña a evaluar antes de afinar: set dorado desde casos escalados, juez calibrado, gate contra la línea base y un gateway que oculta el modelo.
+- Casi todas las cifras son **auto-reportadas** y los diagramas son reconstrucciones: úsalos como patrones, no como benchmarks.
+
+</KeyPoints>
+
+## Siguientes pasos
+
+<Cards cols={3}>
+  <Card title="Casos reales: panorama" href="/guia/casos-reales">Qué tienen en común las empresas que ya operan agentes a escala.</Card>
+  <Card title="Seguridad y gobernanza" href="/guia/seguridad-gobernanza">Defensa en profundidad, políticas deterministas y aprobación humana.</Card>
+  <Card title="Evaluación y observabilidad" href="/guia/evaluacion-observabilidad">Sets dorados, pass^k, LLM-as-judge y trazas OTel.</Card>
+  <Card title="Arquitectura ADK + gateway + Bedrock" href="/guia/arquitectura-adk-gateway-bedrock">Dónde encaja cada control de esta página en tu stack.</Card>
+  <Card title="Caso: datos y analítica" href="/guia/caso-datos-analitica">Agentes que consultan y analizan datos empresariales.</Card>
+  <Card title="Caso: plataformas internas" href="/guia/caso-plataformas-internas">Cómo las empresas construyen la plataforma sobre la que corren sus agentes.</Card>
+</Cards>

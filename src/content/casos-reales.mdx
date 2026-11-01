@@ -1,0 +1,172 @@
+Las arquitecturas de referencia muestran cómo *debería* armarse un sistema. Esta sección muestra cómo lo armaron empresas que ya operan agentes con millones de usuarios, miles de repositorios o cientos de equipos internos, y qué salió distinto de lo planeado. Son más de 30 casos documentados en seis páginas, cada uno con su arquitectura reconstruida en diagramas isométricos, sus cifras con fecha y fuente, y sus límites o retrocesos.
+
+Esta página es el punto de entrada: explica cómo leer un caso con criterio, resume todos los casos en una tabla y destila los patrones que se repiten entre industrias.
+
+## Cómo leer un caso real con criterio
+
+Casi todo lo que se publica sobre agentes en producción lo escribe la propia empresa o su proveedor. Eso no lo invalida —los blogs de ingeniería son la mejor fuente técnica que existe—, pero obliga a leer con cuidado.
+
+<Callout type="warning" title="Cinco filtros antes de creerte una cifra">
+
+1. **¿Quién la reporta?** Casi todas las cifras de esta sección son auto-reportadas. Un caso de estudio en la web de un proveedor (OpenAI, AWS, Cognition, LangChain) es material comercial. Ninguna cifra de resolución en soporte tiene verificación independiente.
+2. **¿Cómo se define la métrica?** "Resuelto" puede significar que el cliente dijo "sí" a la pregunta "¿te ayudó?" (Lyft) o que no volvió a escribir en 30 días (Intercom en AWS). Dos cifras de "resolución" casi nunca son comparables.
+3. **¿De cuándo es?** Las cifras cambian, y no siempre hacia arriba: Salesforce publicó 83–84 % de resolución en 2025 y "más de 63 %" en su página actual, sin explicar la diferencia.
+4. **¿Es una estimación?** Los "años-desarrollador ahorrados" o el "−50 % de tiempo" suelen ser estimaciones de los propios ingenieros, no mediciones controladas.
+5. **¿Qué no se cuenta?** Los casos se publican cuando salen bien. Klarna es valioso justamente porque su historia pública incluye el retroceso.
+
+</Callout>
+
+Los diagramas de esta sección siguen la misma regla: son **reconstrucciones simplificadas** a partir de lo publicado y lo dicen en su resumen. Donde una empresa no publicó un componente, no lo inventamos.
+
+## El mapa de casos
+
+<Cards cols={3}>
+  <Card title="Atención al cliente" tag="Klarna · Intercom · DoorDash · Salesforce" href="/guia/caso-atencion-cliente">El dominio con más volumen y donde más se ve la tensión entre costo y calidad: pipelines de recuperación propios, guardrails en dos niveles, simulación con jueces y el giro de Klarna hacia un modelo híbrido.</Card>
+  <Card title="Migraciones de código" tag="Airbnb · Google · Amazon · Spotify" href="/guia/caso-migraciones-codigo">El caso de éxito más claro de la IA agéntica: miles de archivos migrados porque el compilador y los tests actúan como oráculo. También sus límites: sin tests no hay loop.</Card>
+  <Card title="Investigación multiagente" tag="Anthropic · LinkedIn · Thomson Reuters · Exa" href="/guia/caso-investigacion-multiagente">Orquestadores que lanzan subagentes en paralelo: cuándo rinden (tareas amplias), cuánto cuestan (~15x tokens) y cuándo conviene no usarlos.</Card>
+  <Card title="Datos y analítica" tag="Uber · LinkedIn · Pinterest · Meta" href="/guia/caso-datos-analitica">Text-to-SQL y agentes analistas sobre data warehouses: el problema real es el contexto (catálogos, metadatos, permisos), no la generación de SQL.</Card>
+  <Card title="Servicios financieros" tag="Morgan Stanley · JPMorgan · Moody's · Allianz" href="/guia/caso-servicios-financieros">Cómo despliegan agentes industrias reguladas: evals antes de producción, humano que decide en lo irreversible, residencia de datos y gestión de modelos.</Card>
+  <Card title="Plataformas internas" tag="Uber · Block · Cloudflare · Deutsche Telekom" href="/guia/caso-plataformas-internas">Qué construye una empresa cuando cientos de equipos quieren agentes: gateway de modelos, registro de tools MCP, identidad, observabilidad y catálogo.</Card>
+</Cards>
+
+## Todos los casos de un vistazo
+
+Cifras según la empresa o su proveedor, salvo que se indique otra cosa. El detalle, la metodología y los matices están en cada página.
+
+| Empresa | Dominio | Qué construyó | Cifra principal (fecha) | Página |
+|---|---|---|---|---|
+| Klarna | Soporte | Asistente sobre LangGraph | 2,3 M conversaciones el primer mes (feb-2024); en 2025 admite pérdida de calidad y vuelve a un modelo híbrido | [Soporte](/guia/caso-atencion-cliente) |
+| Intercom Fin | Soporte | Recuperación → reranker propio → generación → validación | Reranker propio: −80 % de costo frente al anterior (sep-2025); USD 0,99 por resolución | [Soporte](/guia/caso-atencion-cliente) |
+| DoorDash | Soporte | RAG + guardrail en dos niveles + simulación con jueces | −90 % de alucinaciones y −99 % de problemas graves de cumplimiento (sep-2024) | [Soporte](/guia/caso-atencion-cliente) |
+| Salesforce Help | Soporte | Agentforce sobre su propio sitio de ayuda | Más de 5 M conversaciones; derivación a humano ajustada de 1 % a ~5 % | [Soporte](/guia/caso-atencion-cliente) |
+| Airbnb | Código | Migración Enzyme → React Testing Library | ~3.500 archivos en 6 semanas frente a 1,5 años estimados (mar-2025) | [Código](/guia/caso-migraciones-codigo) |
+| Google | Código | Migraciones `int32` → `int64` asistidas por LLM | 74 % de los cambios generados por el LLM en 39 migraciones (abr-2025, paper) | [Código](/guia/caso-migraciones-codigo) |
+| Amazon | Código | Upgrades de Java con Amazon Q Developer | 4.500 años-desarrollador estimados (ago-2024); hoy AWS Transform custom | [Código](/guia/caso-migraciones-codigo) |
+| Spotify | Código | Honk, agente de código en segundo plano | Más de 1.500 PRs fusionados (nov-2025); el juez veta ~1 de cada 4 sesiones | [Código](/guia/caso-migraciones-codigo) |
+| Anthropic | Investigación | Orquestador + subagentes en paralelo | +90,2 % frente a agente único en eval interna; ~15x tokens de un chat (jun-2025) | [Multiagente](/guia/caso-investigacion-multiagente) |
+| LinkedIn | Reclutamiento | Hiring Assistant | Búsqueda sobre más de 1.200 M de perfiles (oct-2025) | [Multiagente](/guia/caso-investigacion-multiagente) |
+| Thomson Reuters | Legal | Deep Research en Westlaw y CoCounsel | Más de 1.200 clientes probaron los diseños (ago-2025) | [Multiagente](/guia/caso-investigacion-multiagente) |
+| Uber | Datos | QueryGPT (text-to-SQL) y Finch | De ~10 a ~3 minutos por consulta (sep-2024) | [Datos](/guia/caso-datos-analitica) |
+| LinkedIn | Datos | SQL Bot | 53 % de respuestas bien evaluadas frente a 9 % con solo esquemas (jul-2025, paper) | [Datos](/guia/caso-datos-analitica) |
+| Pinterest | Datos | De text-to-SQL a Analytics Agent | Aceptación al primer intento de 20 % a más de 40 % (2024) | [Datos](/guia/caso-datos-analitica) |
+| Morgan Stanley | Finanzas | Asistente para asesores con evals previas | Más del 98 % de los equipos de asesores lo usa (dic-2024, caso de OpenAI) | [Finanzas](/guia/caso-servicios-financieros) |
+| JPMorgan Chase | Finanzas | LLM Suite, portal multimodelo | De 0 a 200.000 usuarios en ocho meses (jun-2025) | [Finanzas](/guia/caso-servicios-financieros) |
+| Moody's | Finanzas | Sistema multiagente en AWS | ~80 herramientas y más de 100 workflows (re:Invent 2025) | [Finanzas](/guia/caso-servicios-financieros) |
+| Allianz | Seguros | Project Nemo: siete agentes para reclamos | −80 % de tiempo de procesamiento; el pago nunca se automatiza (nov-2025) | [Finanzas](/guia/caso-servicios-financieros) |
+| Uber | Plataforma | GenAI Gateway + MCP Gateway | Más de 800 servidores MCP y 5.000 tools tras un gateway (oct-2026) | [Plataformas](/guia/caso-plataformas-internas) |
+| Block | Plataforma | goose + servidores MCP curados | ~12.000 empleados en 15 funciones (dic-2025) | [Plataformas](/guia/caso-plataformas-internas) |
+| Cloudflare | Plataforma | Stack interno sobre su propio AI Gateway | 20 M solicitudes en 30 días (abr-2026) | [Plataformas](/guia/caso-plataformas-internas) |
+| Deutsche Telekom | Plataforma | Eclipse LMOS, multiagente sobre Kubernetes | Más de 1 M de preguntas respondidas (feb-2025) | [Plataformas](/guia/caso-plataformas-internas) |
+
+## La anatomía que se repite
+
+Al poner los casos lado a lado aparece una arquitectura común. No es la de ninguna empresa en particular —nadie publica todas las piezas—, pero cada componente está respaldado por varios casos. Recorre los pasos: cada uno cita quién lo hace y con qué resultado.
+
+<Diagram id="casos-anatomia" height={600} />
+
+Si comparas este diagrama con la [arquitectura ADK + AI gateway + Bedrock](/guia/arquitectura-adk-gateway-bedrock), vas a notar que las piezas coinciden: el AI gateway, el gateway de herramientas (AgentCore Gateway o un servidor MCP propio), la verificación y las trazas. Lo que los casos agregan es **dónde ponen el esfuerzo** y **qué falla primero**.
+
+## Diez lecciones transversales
+
+### 1. Un oráculo vale más que un modelo mejor
+
+El patrón más consistente de toda la sección: los casos con mejores resultados tienen una forma **determinista** de saber si el agente acertó. En migraciones, el compilador, los linters y los tests: Airbnb dejó que el agente iterara contra ellos hasta migrar el 97 % de los archivos en cuatro días; Google y Spotify hacen lo mismo. Spotify documenta el reverso: sin tests no hay oráculo y el agente pasa a ser un generador de borradores; además abandonaron las migraciones de Scio porque la variabilidad entre equipos impedía darle al agente un contexto completo.
+
+Donde no hay oráculo natural, las empresas **construyen uno**: el guardrail en dos niveles de DoorDash, el juez LLM calibrado contra humanos de Robinhood, el juez de Spotify que veta una de cada cuatro sesiones.
+
+<Callout type="tip" title="Pregunta de diseño">
+Antes de elegir framework, pregúntate: ¿cómo va a saber el sistema, sin un humano, que una respuesta es correcta? Si la respuesta es "no puede", diseña primero ese verificador (reglas, validación de esquema, consultas de comprobación, juez calibrado) y luego el agente.
+</Callout>
+
+### 2. El contexto es el trabajo duro, no el prompt
+
+En los agentes de datos, la diferencia la hace el catálogo: el paper de LinkedIn SQL Bot muestra que con solo los esquemas el modelo logra 9 % de respuestas bien evaluadas; con su grafo de conocimiento (descripciones, tablas certificadas, consultas de ejemplo), 53 %. Pinterest subió la aceptación al primer intento de 20 % a más de 40 % con selección de tablas por embeddings, y el acierto de su búsqueda de tablas pasó de 40 % a 90 % al darle más peso a la documentación. En soporte, Intercom entrenó su propio reranker y Salesforce descubrió que los artículos duplicados de su base de conocimiento confundían la recuperación. Todo esto es [context engineering](/guia/context-engineering) y [RAG](/guia/rag) bien hecho, con un [reranker](/guia/rag) incluido.
+
+### 3. La forma más simple suele ganar
+
+<Diagram id="casos-escalera" height={520} />
+
+Varios de los casos más grandes son **workflows** con el LLM en pasos acotados, no agentes autónomos. Google generó el 74 % de los cambios de sus migraciones con un pipeline fijo; Uber QueryGPT es una secuencia de agentes especializados con pasos definidos; Intercom Fin es un pipeline de recuperación, reordenamiento, generación y validación. El multiagente aparece donde la tarea es amplia y paralelizable (investigación) o donde el dominio se divide de forma natural (los siete agentes de Allianz para reclamos). Es la misma recomendación de [patrones de diseño](/guia/patrones-de-diseno): empezar por lo más simple y subir solo cuando los datos lo justifican.
+
+### 4. El multiagente se paga en tokens
+
+Anthropic es explícito: su sistema de investigación multiagente mejora 90,2 % a un agente único en su evaluación interna, pero consume del orden de 15 veces los tokens de un chat, y el uso de tokens por sí solo explica la mayor parte de la variación de rendimiento. Cognition publicó casi al mismo tiempo el argumento contrario para tareas con mucho estado compartido, como escribir código. Las dos posiciones son compatibles: el multiagente rinde cuando los subagentes pueden trabajar **en paralelo sobre partes independientes** y el valor de la respuesta justifica el costo. El detalle está en [investigación multiagente](/guia/caso-investigacion-multiagente) y [orquestación avanzada](/guia/orquestacion-avanzada).
+
+### 5. Evaluar antes de desplegar, y seguir evaluando después
+
+Morgan Stanley no pone en producción un caso de uso sin un set de evals calificado por expertos y regresiones diarias. DoorDash simula conversaciones completas con más de 50 jueces calibrados antes de cada cambio. Robinhood usa casos escalados reales como set dorado y bloquea cualquier cambio que no supere la línea base. El patrón común es un **flywheel**: producción genera trazas, las trazas revelan fallos, los fallos se convierten en casos de evaluación, y la evaluación bloquea regresiones. Cómo armarlo está en [evaluación y observabilidad](/guia/evaluacion-observabilidad).
+
+### 6. El humano no desaparece: cambia de lugar
+
+En las migraciones, el humano revisa el PR en vez de escribir el código. En seguros, Allianz automatiza la recopilación y el análisis de reclamos, pero un agente de auditoría resume y **una persona decide el pago**. En soporte, Salesforce aumentó la tasa de derivación a humanos al ver que su agente bloqueaba el acceso a una persona. Klarna es el caso extremo: tras reemplazar el equivalente a cientos de agentes, su CEO reconoció en 2025 que la calidad había bajado y la empresa volvió a invertir en atención humana. Diseña el handoff como una funcionalidad, no como un fallo.
+
+### 7. Centralizar el acceso a modelos y herramientas
+
+A escala, cada empresa termina construyendo dos gateways. Uno hacia los **modelos**: Uber GenAI Gateway, el AI Gateway que Cloudflare usa internamente, el LLM Gateway de Robinhood, LLM Suite de JPMorgan. Otro hacia las **herramientas**: el MCP Gateway de Uber con más de 800 servidores registrados, los servidores MCP curados de Block. Ambos resuelven lo mismo: autenticación, permisos, costos por equipo, auditoría y la posibilidad de cambiar un proveedor sin tocar a los agentes. Es la tesis de [gateways](/guia/gateways) y [MCP](/guia/mcp) confirmada en producción.
+
+### 8. Define tu métrica antes de publicar tu cifra
+
+Las cifras de "resolución" del soporte no son comparables entre empresas porque cada una define "resuelto" a su manera. Elige una métrica de negocio con definición explícita (resolución verificada a N días, tiempo hasta un PR fusionado, consulta aceptada sin edición), mídela antes del agente para tener línea base y repórtala con su definición. Es lo que permite discutir el costo frente a la calidad con datos, que es exactamente la conversación que Klarna tuvo en público.
+
+### 9. La adopción depende del canal
+
+LinkedIn multiplicó entre 5 y 10 veces el uso de SQL Bot al integrarlo en la plataforma de notebooks que sus analistas ya usaban. Uber Genie vive en los canales de Slack de on-call. El agente analítico de Pinterest llegó al 40 % de los analistas en dos meses porque estaba donde ellos trabajaban. Un agente excelente en una pestaña aparte tiene menos impacto que uno correcto dentro de la herramienta diaria.
+
+### 10. Los estándares abiertos ganan terreno
+
+Block construyó goose sobre MCP y lo donó a la Agentic AI Foundation; Uber registra sus herramientas en un MCP Gateway; LinkedIn declaró que migra su registro propietario de agentes y skills hacia MCP y A2A; Deutsche Telekom publicó su plataforma como Eclipse LMOS. La razón es práctica: cuando cientos de equipos publican herramientas y agentes, un protocolo común reduce el costo de integración de N×M a N+M. Más contexto en [MCP](/guia/mcp) y [A2A](/guia/a2a).
+
+## Lo que esto significa para un stack ADK + gateway + Bedrock
+
+Un hallazgo honesto de esta investigación: **a octubre de 2026 no encontramos casos públicos con nombre que describan un despliegue a gran escala sobre Bedrock AgentCore o Google ADK con arquitectura y cifras**. Lo que sí hay son casos que validan las piezas por separado:
+
+- **Bedrock como capa de modelos en producción**: DoorDash en su autoservicio por voz (Claude en Bedrock con Knowledge Bases), Lyft con Claude en Bedrock para soporte, Intercom con Anthropic en Bedrock, Moody's y Robinhood sobre Bedrock, y el framework de Allianz Technology con Bedrock, LangGraph y MCP.
+- **Gateways propios hacia los modelos**: Uber, Cloudflare, Robinhood y JPMorgan, que es el rol de tu AI gateway.
+- **MCP como capa de herramientas**: Uber, Block, Cloudflare y LinkedIn.
+- **Arquitecturas publicadas por AWS**: por ejemplo, agentes de investigación con Deep Agents sobre AgentCore, presentadas como tutorial y no como caso de cliente.
+
+<Callout type="info" title="Cómo traducir las lecciones a tu stack">
+
+| Lección | Dónde vive en ADK + gateway + Bedrock |
+|---|---|
+| Oráculo y verificación | `after_model_callback` / `after_tool_callback` de ADK, tools de validación, Bedrock Guardrails, juez en CI |
+| Contexto curado | Bedrock Knowledge Bases o tu vector store con reranking, catálogo de datos expuesto por MCP |
+| Forma más simple | Workflows de ADK (`SequentialAgent`, grafos en ADK 2.x) antes de multiagente libre |
+| Costo del multiagente | Presupuestos y límites por equipo en el AI gateway, métricas de tokens por traza |
+| Evals continuas | Evaluación de ADK y de AgentCore, sets dorados versionados, gate en el pipeline de despliegue |
+| Humano en el loop | `before_tool_callback` que exige aprobación en acciones irreversibles, handoff explícito |
+| Gateways | AI gateway (LiteLLM u otro) hacia Bedrock; AgentCore Gateway o servidor MCP propio hacia sistemas |
+
+</Callout>
+
+Las páginas de [AgentCore](/guia/aws-bedrock-agentcore), [seguridad y gobernanza](/guia/seguridad-gobernanza) y la [arquitectura de referencia](/guia/arquitectura-adk-gateway-bedrock) tienen el detalle de cada pieza.
+
+## Cómo seguir investigando
+
+Si quieres buscar más casos, estas fuentes rinden:
+
+- **Blogs de ingeniería** de las empresas (Uber, LinkedIn, Spotify, DoorDash, Airbnb, Pinterest, Meta): son la fuente más técnica y la que más cuenta los problemas.
+- **Papers en arXiv** de equipos industriales (Google, LinkedIn, Meta): incluyen metodología y números de evaluación.
+- **Sesiones de conferencias** como AWS re:Invent, Google Cloud Next, QCon e InfoQ: muchas empresas cuentan ahí lo que no publican por escrito.
+- **Índices de casos** como la base de datos LLMOps de ZenML: útiles para descubrir casos, pero son resúmenes; verifica siempre la fuente original.
+- **Casos de estudio de proveedores**: útiles para saber que algo existe, pero trátalos como marketing hasta encontrar una fuente de la propia empresa.
+
+<KeyPoints title="Lo esencial de los casos reales">
+
+- Casi todas las cifras publicadas son auto-reportadas y usan definiciones propias; compáralas con cuidado y fíjate en la fecha.
+- El factor de éxito más repetido es un **oráculo**: tests, compiladores, reglas o jueces calibrados que verifican sin un humano.
+- El contexto curado (catálogos, documentación limpia, reranking) pesa más que el prompt o el modelo.
+- Muchos casos grandes son **workflows**; el multiagente rinde en tareas amplias y paralelizables y cuesta ~15x en tokens.
+- Evals antes de desplegar y un flywheel de trazas a casos de prueba aparecen en todos los casos maduros.
+- El humano se mueve a revisar y decidir lo irreversible; el handoff es una funcionalidad.
+- A escala, todos construyen un gateway de modelos y un registro/gateway de herramientas, cada vez más sobre MCP.
+
+</KeyPoints>
+
+## Siguientes pasos
+
+<Cards cols={3}>
+  <Card title="Empieza por soporte" href="/guia/caso-atencion-cliente">El dominio más cercano a un retail: pipelines de recuperación, guardrails y la lección de Klarna.</Card>
+  <Card title="La plataforma interna" href="/guia/caso-plataformas-internas">Si vas a habilitar a varios equipos, el blueprint destilado de Uber, Block, Cloudflare y Deutsche Telekom.</Card>
+  <Card title="Tu arquitectura de referencia" href="/guia/arquitectura-adk-gateway-bedrock">Vuelve a ADK + AI gateway + Bedrock con las lecciones de los casos en mente.</Card>
+</Cards>

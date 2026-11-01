@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { Link } from 'react-router'
-import { ArrowRight, Boxes, Compass, Layers, Route, ShieldCheck, Workflow } from 'lucide-react'
+import { ArrowRight, Boxes, Building2, Compass, Layers, Route, ShieldCheck, Workflow } from 'lucide-react'
 import { Diagram } from '../components/iso/Diagram'
 import { posts, postsBySection, SECTIONS } from '../lib/content'
 
@@ -11,6 +11,7 @@ const SECTION_ICON = {
   frameworks: Boxes,
   plataformas: Layers,
   arquitecturas: Route,
+  casos: Building2,
   produccion: ShieldCheck,
 } as const
 

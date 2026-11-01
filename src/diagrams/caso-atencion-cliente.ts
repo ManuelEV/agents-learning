@@ -1,0 +1,152 @@
+import type { IsoSpec } from '../components/iso/types'
+
+export const cacFinPipeline: IsoSpec = {
+  id: 'cac-fin-pipeline',
+  title: 'Intercom Fin: el pipeline de una respuesta',
+  summary:
+    '**Reconstrucción simplificada** a partir de la página *Fin AI Engine* y del post de investigación sobre el reranker de Intercom (sep. 2025). Fin no es "un LLM con un prompt": es una cadena de etapas especializadas —refinar la consulta, recuperar con un modelo propio, reordenar con otro, generar con un modelo post-entrenado y **validar antes de enviar**—, con escalamiento a una persona cuando no puede responder.',
+  height: 500,
+  zones: [{ id: 'engine', label: 'Fin AI Engine (según Intercom)', from: [1.6, -4.9], to: [15.2, 4.9], tone: 'agent' }],
+  nodes: [
+    { id: 'cliente', label: 'Cliente final', sub: 'chat · email · voz', at: [-1.4, 0], shape: 'person', tone: 'user', icon: 'user', info: 'El cliente de una empresa que usa Fin (más de 12.000 empresas según Intercom). Escribe su pregunta en el canal que la empresa tenga habilitado.' },
+    { id: 'refinar', label: 'Refinar consulta', sub: 'seguridad · relevancia', at: [3.3, 0], shape: 'diamond', tone: 'guard', icon: 'filter', info: 'Primera etapa: chequea seguridad y relevancia, condensa la conversación en una consulta corta y decide si aplica un *Workflow* o una *Custom Answer* definida por la empresa.' },
+    { id: 'workflow', label: 'Workflows', sub: 'procedimientos definidos', at: [3.3, -3.4], shape: 'box', tone: 'tool', icon: 'workflow', info: 'Procedimientos que la empresa configura (p. ej., un reembolso con pasos y llamadas a sus APIs). Si la consulta calza con uno, se sigue ese camino en vez de responder solo con conocimiento.' },
+    { id: 'retrieval', label: 'fin-cx-retrieval', sub: 'top 40 candidatos', at: [6.6, 0], shape: 'stack', tone: 'data', icon: 'search', info: 'Modelo de recuperación propio de Intercom. Según su post de investigación, la consulta se embebe y se compara contra artículos y snippets pre-embebidos; se toman los **40** mejores candidatos.' },
+    { id: 'fuentes', label: 'Conocimiento', sub: 'artículos · conversaciones', at: [6.6, 3.4], shape: 'doc', tone: 'memory', icon: 'book', info: 'Artículos del help center, conversaciones resueltas, snippets estructurados y datos de sistemas integrados de cada empresa cliente.' },
+    { id: 'rerank', label: 'fin-cx-reranker', sub: 'ModernBERT-large', at: [10.0, 0], shape: 'box', tone: 'model', icon: 'list', info: 'Reranker propio entrenado con 400.000 consultas reales × 40 pasajes, etiquetados por un LLM "maestro". Según Intercom superó a Cohere Rerank 3.5 (+17,5 % MAP offline) y redujo 80 % el costo de reranking, con P50 ≈ 150 ms.' },
+    { id: 'apex', label: 'Fin Apex', sub: 'generador', at: [13.6, 0], shape: 'sphere', tone: 'model', icon: 'sparkles', info: 'Modelo generador post-entrenado por Intercom con datos de producción de Fin (Apex 1.0 en marzo de 2026; la página actual menciona Apex 2.0). Intercom no revela el modelo base.' },
+    { id: 'validar', label: 'Validación', sub: 'exactitud · seguridad', at: [13.6, -3.4], shape: 'diamond', tone: 'guard', icon: 'shield', info: 'Última etapa antes de enviar: comprueba la respuesta contra estándares de exactitud y seguridad. El caso de AWS describe 15–20 subcomponentes, algunos dedicados a verificar respuestas y cumplimiento de políticas.' },
+    { id: 'humano', label: 'Agente humano', sub: 'inbox de la empresa', at: [13.6, 3.4], shape: 'person', tone: 'user', icon: 'hand', info: 'Si Fin no puede responder con el contenido disponible, escala la conversación al equipo humano de la empresa. Esa conversación **no** cuenta como resolución (ni se cobra).' },
+  ],
+  edges: [
+    { from: 'cliente', to: 'refinar' },
+    { from: 'refinar', to: 'workflow', route: 'z' },
+    { from: 'refinar', to: 'retrieval' },
+    { from: 'fuentes', to: 'retrieval', route: 'z' },
+    { from: 'retrieval', to: 'rerank', label: 'K=40' },
+    { from: 'rerank', to: 'apex', label: 'presupuesto' },
+    { from: 'apex', to: 'validar', route: 'z' },
+    { from: 'apex', to: 'humano', route: 'z', dashed: true },
+    { from: 'validar', to: 'cliente', route: 'arc' },
+  ],
+  steps: [
+    { title: '1 · Pregunta', body: 'Un cliente escribe "¿Cómo cambio el plan de mi cuenta a anual?". Fin recibe toda la conversación, no solo el último mensaje.', flows: ['cliente>refinar'] },
+    { title: '2 · Refinar y enrutar', body: 'Se chequea seguridad y relevancia y se condensa la conversación en una consulta corta. Si la empresa configuró un *Workflow* para cambios de plan, se sigue ese procedimiento.', flows: ['refinar>workflow'], focus: ['refinar', 'workflow'] },
+    { title: '3 · Recuperación', body: 'La consulta se embebe y `fin-cx-retrieval` busca en artículos, conversaciones resueltas y snippets. Salen 40 candidatos.', flows: ['refinar>retrieval', 'fuentes>retrieval'] },
+    { title: '4 · Reranking propio', body: '`fin-cx-reranker` reordena los 40 pasajes; un filtro de **presupuesto de contexto** deja solo los mejores. Es la etapa donde Intercom publicó más detalle técnico.', flows: ['retrieval>rerank'] },
+    { title: '5 · Generación', body: 'Fin Apex redacta la respuesta usando solo los pasajes seleccionados (grounding en la base de conocimiento de la empresa).', flows: ['rerank>apex'] },
+    { title: '6 · Validar y responder', body: 'La respuesta pasa una validación de exactitud y seguridad antes de llegar al cliente. Si Fin resuelve sin derivar a una persona (según la definición de Intercom), cuenta como **resolución** y se cobra (USD 0,99).', flows: ['apex>validar', 'validar>cliente'] },
+    { title: '7 · Escalamiento', body: 'Si el contenido no alcanza, Fin deriva al equipo humano. Aquí está el incentivo del precio por resolución: Intercom solo cobra cuando Fin resuelve.', flows: ['apex>humano'] },
+  ],
+}
+
+export const cacDoordashGuardrail: IsoSpec = {
+  id: 'cac-doordash-guardrail',
+  title: 'DoorDash: soporte a Dashers con RAG, guardrail en dos niveles y LLM Judge',
+  summary:
+    '**Reconstrucción simplificada** a partir del post de ingeniería de DoorDash (sep. 2024). El chatbot condensa la conversación, recupera artículos de la base de conocimiento y genera una respuesta que **no se muestra** hasta pasar un guardrail barato (similitud semántica) y, solo si hace falta, uno caro (evaluador LLM). Fuera de línea, un LLM Judge y revisión humana miden la calidad.',
+  height: 500,
+  nodes: [
+    { id: 'dasher', label: 'Dasher', sub: 'repartidor en ruta', at: [0, 0], shape: 'person', tone: 'user', icon: 'user', info: 'Repartidor con un problema en plena entrega (p. ej., no encuentra la dirección o hay un problema con el pago). Necesita respuesta rápida y correcta.' },
+    { id: 'condensar', label: 'Condensar', sub: 'problema central', at: [3.3, 0], shape: 'box', tone: 'agent', icon: 'scroll', info: 'Resume la conversación de varios turnos para identificar el problema central y contextualizar la consulta de búsqueda.' },
+    { id: 'kb', label: 'KB + casos resueltos', sub: 'vector store', at: [3.3, 3.4], shape: 'stack', tone: 'data', icon: 'book', info: 'Artículos de la base de conocimiento y casos históricos resueltos. DoorDash detectó que muchas fallas venían de **vacíos en la KB**, no del modelo, y priorizó mejorarla.' },
+    { id: 'llm', label: 'LLM generador', sub: 'prompt + artículo', at: [6.6, 0], shape: 'sphere', tone: 'model', icon: 'sparkles', info: 'Genera la respuesta con el artículo recuperado insertado en una plantilla. Prácticas reportadas: dividir prompts complejos, evitar negaciones, dar ejemplos y usar chain-of-thought. DoorDash no publica qué modelo usa.' },
+    { id: 'g1', label: 'Guardrail nivel 1', sub: 'similitud semántica', at: [9.9, 0], shape: 'diamond', tone: 'guard', icon: 'filter', info: 'Chequeo barato propio: compara la respuesta contra segmentos del artículo con una ventana deslizante. Si se parece lo suficiente, es poco probable que sea alucinación y pasa.' },
+    { id: 'g2', label: 'Guardrail nivel 2', sub: 'evaluador LLM', at: [9.9, -3.4], shape: 'diamond', tone: 'guard', icon: 'shield', info: 'Solo se invoca si el nivel 1 marca la respuesta. Recibe respuesta, artículos e historial y decide si está fundamentada, con una justificación. Rechazaron un guardrail más sofisticado por latencia y costo.' },
+    { id: 'humano', label: 'Agente humano', sub: 'soporte DoorDash', at: [9.9, 3.4], shape: 'person', tone: 'user', icon: 'hand', info: 'Si la respuesta falla el guardrail, se reintenta o se deriva a un agente humano. Mejor una derivación que una respuesta inventada.' },
+    { id: 'judge', label: 'LLM Judge', sub: '5 dimensiones', at: [13.2, 0], shape: 'box', tone: 'infra', icon: 'eye', info: 'Monitoreo fuera de línea: corrección del retrieval, exactitud de la respuesta, gramática, coherencia con el contexto y relevancia. Se complementa con revisión humana de muestras aleatorias y regresión con Promptfoo en cada cambio de prompt.' },
+  ],
+  edges: [
+    { from: 'dasher', to: 'condensar' },
+    { from: 'condensar', to: 'kb', route: 'z' },
+    { from: 'condensar', to: 'llm' },
+    { from: 'llm', to: 'g1' },
+    { from: 'g1', to: 'g2', route: 'z', label: 'dudosa' },
+    { from: 'g1', to: 'humano', route: 'z', dashed: true },
+    { from: 'g1', to: 'dasher', route: 'arc' },
+    { from: 'g1', to: 'judge', dashed: true },
+  ],
+  steps: [
+    { title: '1 · Consulta del Dasher', body: 'Antes, el soporte se basaba en flujos predefinidos que solo cubrían un subconjunto pequeño de problemas. Ahora el Dasher escribe en lenguaje natural.', flows: ['dasher>condensar'] },
+    { title: '2 · Condensar y recuperar', body: 'Se resume la conversación al problema central y se buscan artículos y casos resueltos similares en el vector store.', flows: ['condensar>kb', 'kb>condensar'] },
+    { title: '3 · Generar', body: 'El artículo se inserta en la plantilla de prompt y el LLM genera una respuesta candidata. Todavía no la ve nadie.', flows: ['condensar>llm', 'llm>g1'] },
+    { title: '4 · Guardrail barato', body: 'La similitud semántica contra el artículo filtra la mayoría de los casos sin llamar a otro LLM. Diseño en cascada: lo barato primero.', focus: ['g1'] },
+    { title: '5 · Guardrail caro (solo si hace falta)', body: 'Si el nivel 1 duda, un evaluador LLM revisa si la respuesta está fundamentada. Según DoorDash, el guardrail redujo 90 % las alucinaciones y 99 % los problemas graves de cumplimiento.', flows: ['g1>g2', 'g2>g1'] },
+    { title: '6 · Responder o derivar', body: 'Si pasa, llega al Dasher. Si falla, reintento o derivación a un humano. El costo: más latencia por cada verificación y reintento.', flows: ['g1>dasher', 'g1>humano'] },
+    { title: '7 · Medir fuera de línea', body: 'El LLM Judge puntúa transcripciones en cinco dimensiones y humanos revisan muestras. Los hallazgos alimentan mejoras de KB, retrieval y prompts.', flows: ['g1>judge'], focus: ['judge', 'kb'] },
+  ],
+}
+
+export const cacDoordashFlywheel: IsoSpec = {
+  id: 'cac-doordash-flywheel',
+  title: 'DoorDash: simulación y evaluación antes de producción',
+  summary:
+    '**Reconstrucción simplificada** a partir del post de DoorDash de enero de 2026 y su cobertura en InfoQ y ByteByteGo. Un LLM hace de cliente a partir de perfiles extraídos de transcripciones reales, conversa con el chatbot en prueba contra **APIs mockeadas**, y más de 50 jueces LLM binarios —calibrados con expertos humanos— deciden si el cambio puede ir a producción.',
+  height: 500,
+  nodes: [
+    { id: 'transcripts', label: 'Transcripciones', sub: 'históricas reales', at: [0, 0], shape: 'cylinder', tone: 'data', icon: 'database', info: 'Conversaciones reales de soporte de clientes, comercios y Dashers. Son la materia prima de los escenarios, incluidas las que salieron mal.' },
+    { id: 'perfiles', label: 'Perfiles', sub: 'perfil del cliente', at: [3.5, 0], shape: 'doc', tone: 'memory', icon: 'file', info: 'Un LLM extrae de cada transcripción un perfil de comportamiento: rasgos de personalidad, narrativa de la situación y resultado que busca el cliente.' },
+    { id: 'simulador', label: 'Cliente simulado', sub: 'LLM sin guion', at: [7.4, 0], shape: 'sphere', tone: 'model', icon: 'users', info: 'Conversa sin guion fijo: en cada turno evalúa si avanza, si debe dar más datos o si la conversación da vueltas, y escala su frustración gradualmente.' },
+    { id: 'chatbot', label: 'Chatbot en prueba', sub: 'versión candidata', at: [10.5, 0], shape: 'tall', tone: 'agent', icon: 'bot', info: 'La versión candidata del chatbot de producción (prompts, contexto y herramientas modificados).' },
+    { id: 'mocks', label: 'APIs mockeadas', sub: 'pedidos · reembolsos', at: [10.5, 3.4], shape: 'box', tone: 'tool', icon: 'plug', info: 'Backends simulados que mezclan datos reales con datos del escenario, preservando relaciones y timestamps. Permiten probar fraude o reembolsos de alto valor sin tocar producción.' },
+    { id: 'casestate', label: 'Case state layer', sub: 'contexto resumido', at: [9.6, -3.8], shape: 'doc', tone: 'memory', icon: 'layers', info: 'Sintetiza el historial crudo de herramientas (pedidos, estados de entrega, decisiones de reembolso) en una representación estructurada. Reemplazó volcar logs crudos al contexto, que causaba alucinaciones.' },
+    { id: 'jueces', label: 'Jueces LLM', sub: '+50 evals pass/fail', at: [14.0, 0], shape: 'diamond', tone: 'guard', icon: 'check', info: 'Cada evaluación recibe la transcripción completa (con llamadas a herramientas) y la política aplicable, y devuelve pass/fail con razonamiento: alucinación, tono, clasificación del problema, etc.' },
+    { id: 'expertos', label: 'Expertos humanos', sub: 'calibran jueces', at: [14.0, 3.4], shape: 'person', tone: 'user', icon: 'graduation', info: 'Etiquetan muestras de conversaciones; se mide el acuerdo con el juez LLM y se ajusta su prompt hasta que coincide con el criterio humano.' },
+    { id: 'gate', label: 'Gate de despliegue', sub: 'suite completa', at: [14.0, -3.6], shape: 'hex', tone: 'infra', icon: 'flag', info: 'La suite completa debe pasar antes de que cualquier cambio llegue a producción. Un solo job orquesta generación de escenarios, simulación y evaluación.' },
+  ],
+  edges: [
+    { from: 'transcripts', to: 'perfiles' },
+    { from: 'perfiles', to: 'simulador' },
+    { from: 'simulador', to: 'chatbot', label: 'multi-turno' },
+    { from: 'chatbot', to: 'mocks', route: 'z' },
+    { from: 'chatbot', to: 'casestate', route: 'z' },
+    { from: 'chatbot', to: 'jueces', label: 'transcripción' },
+    { from: 'expertos', to: 'jueces', route: 'z', dashed: true },
+    { from: 'jueces', to: 'gate', route: 'z' },
+  ],
+  steps: [
+    { title: '1 · Escenarios desde datos reales', body: 'Se toman transcripciones históricas y un LLM extrae perfiles: quién es el cliente, qué le pasó y qué quiere lograr.', flows: ['transcripts>perfiles'] },
+    { title: '2 · Simular la conversación', body: 'El cliente simulado conversa con el chatbot candidato sin guion fijo, reaccionando a sus respuestas. Más de 200 conversaciones en menos de 5 minutos.', flows: ['perfiles>simulador', 'simulador>chatbot', 'chatbot>simulador'] },
+    { title: '3 · Backends mockeados', body: 'Consultar un pedido o pedir un reembolso llama a APIs simuladas con datos realistas, para cubrir casos borde sin riesgo.', flows: ['chatbot>mocks', 'mocks>chatbot'] },
+    { title: '4 · Contexto estructurado', body: 'El case state layer resume el historial de herramientas antes de pasarlo al modelo. Tras 11 iteraciones (una empeoró los resultados), redujo ~90 % las alucinaciones en simulación, según DoorDash.', flows: ['chatbot>casestate', 'casestate>chatbot'] },
+    { title: '5 · Jueces calibrados', body: 'Más de 50 evaluaciones binarias revisan cada transcripción; los jueces se calibran contra etiquetas de expertos humanos antes de confiar en ellos.', flows: ['chatbot>jueces', 'expertos>jueces'] },
+    { title: '6 · Gate', body: 'Solo si la suite completa pasa, el cambio va a producción. Cada falla nueva observada se convierte en una evaluación más: ese es el *flywheel*.', flows: ['jueces>gate'] },
+  ],
+}
+
+export const cacSalesforceHelp: IsoSpec = {
+  id: 'cac-salesforce-help',
+  title: 'Salesforce: Agentforce en help.salesforce.com',
+  summary:
+    '**Reconstrucción simplificada** a partir de publicaciones de Salesforce (ene. y nov. 2025) y de la cobertura de VentureBeat (jul. 2025). El agente clasifica la intención en *topics*, recupera contenido de ayuda y datos de la cuenta desde Data 360, genera con un LLM externo y deriva a ingenieros de soporte. La observabilidad y la revisión semanal cierran el ciclo.',
+  height: 500,
+  nodes: [
+    { id: 'cliente', label: 'Cliente Salesforce', sub: 'help.salesforce.com', at: [0, 0], shape: 'person', tone: 'user', icon: 'user', info: 'Administradores y desarrolladores de clientes de Salesforce. El portal recibe más de 60 millones de visitas al año, según la empresa.' },
+    { id: 'agente', label: 'Agentforce', sub: 'Atlas Reasoning Engine', at: [3.3, 0], shape: 'tall', tone: 'agent', icon: 'bot', info: 'Orquesta prompts, código y llamadas al LLM para clasificar la intención y elegir un *topic* con sus instrucciones y acciones.' },
+    { id: 'topics', label: 'Topics + acciones', sub: 'instrucciones', at: [3.3, -3.4], shape: 'box', tone: 'tool', icon: 'list', info: 'Cada topic agrupa instrucciones y acciones (p. ej., reseteo de contraseña). Salesforce reemplazó listas de reglas rígidas por instrucciones de objetivo, como "actúa en el mejor interés de Salesforce".' },
+    { id: 'contenido', label: 'Contenido de ayuda', sub: '~740.000 piezas', at: [6.6, 0], shape: 'stack', tone: 'data', icon: 'book', info: 'Artículos y documentación en varios idiomas y líneas de producto. Los duplicados ("content collisions", como decenas de artículos de reseteo de contraseña) confundían la recuperación y hubo que limpiar y consolidar.' },
+    { id: 'data360', label: 'Data 360', sub: 'cuenta · uso del producto', at: [6.6, 3.4], shape: 'cylinder', tone: 'data', icon: 'database', info: 'Antes Data Cloud. Aporta datos estructurados del cliente (historial de cuenta, uso de producto) para personalizar y fundamentar la respuesta.' },
+    { id: 'llm', label: 'LLM', sub: 'OpenAI (según prensa)', at: [9.9, 0], shape: 'sphere', tone: 'model', icon: 'sparkles', info: 'VentureBeat reporta que los fragmentos se envían a OpenAI para generar la respuesta; no se publicó el modelo exacto. Responde en el idioma del cliente a partir de contenido en inglés.' },
+    { id: 'ingeniero', label: 'Ingeniero de soporte', sub: 'handoff', at: [9.9, 3.4], shape: 'person', tone: 'user', icon: 'hand', info: 'Recibe los casos derivados. El handoff pasó de ~1 % a ~5 % cuando el equipo vio que impedir el acceso a humanos perjudicaba a los clientes.' },
+    { id: 'obs', label: 'Observabilidad', sub: 'revisión semanal', at: [9.9, -3.4], shape: 'box', tone: 'infra', icon: 'chart', info: 'Agentforce Observability mide latencia, escalamientos y errores con alertas. El equipo revisa semanalmente resueltas, abandonadas y derivadas para detectar vacíos de contenido.' },
+  ],
+  edges: [
+    { from: 'cliente', to: 'agente' },
+    { from: 'agente', to: 'topics', route: 'z' },
+    { from: 'agente', to: 'contenido' },
+    { from: 'agente', to: 'data360', route: 'z' },
+    { from: 'contenido', to: 'llm' },
+    { from: 'llm', to: 'cliente', route: 'arc' },
+    { from: 'llm', to: 'ingeniero', route: 'z', dashed: true },
+    { from: 'llm', to: 'obs', route: 'z', dashed: true },
+  ],
+  steps: [
+    { title: '1 · Primer contacto: el agente', body: 'Salesforce quitó el botón "contact support" de sus sitios en inglés: casi todos los clientes empiezan con Agentforce. Lanzaron con ~10 % del tráfico, solo inglés y usuarios autenticados.', flows: ['cliente>agente'] },
+    { title: '2 · Intención → topic', body: 'Atlas clasifica la intención y elige un topic con sus instrucciones y acciones (p. ej., reseteo de contraseña, que se resuelve de forma autónoma).', flows: ['agente>topics'] },
+    { title: '3 · Recuperar contenido', body: 'Busca en el contenido de ayuda. La lección más cara: artículos duplicados o contradictorios producían respuestas erróneas; hubo que limpiar el corpus.', flows: ['agente>contenido'] },
+    { title: '4 · Datos de la cuenta', body: 'Data 360 aporta contexto de la cuenta y del uso del producto para fundamentar la respuesta.', flows: ['agente>data360'] },
+    { title: '5 · Generar en el idioma del cliente', body: 'El LLM genera desde contenido en inglés y responde en el idioma del cliente (japonés, francés, etc.) sin traducir los artículos.', flows: ['contenido>llm', 'llm>cliente'] },
+    { title: '6 · Handoff sin fricción', body: 'En incidentes o casos complejos el agente reconoce el problema, se disculpa y deriva rápido. Un handoff de 1 % parecía un éxito hasta que leyeron las conversaciones.', flows: ['llm>ingeniero'] },
+    { title: '7 · Medir y corregir', body: 'Observabilidad y revisión semanal de resueltas, abandonadas y derivadas alimentan cambios de contenido, prompts y retrievers.', flows: ['llm>obs'], focus: ['obs', 'contenido'] },
+  ],
+}

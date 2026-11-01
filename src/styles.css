@@ -1134,7 +1134,7 @@ kbd {
   display: flex;
   flex-wrap: wrap;
   gap: 4px 10px;
-  max-width: 70%;
+  max-width: 58%;
   font-size: 11px;
   color: var(--text-3);
   pointer-events: none;
@@ -1160,7 +1160,7 @@ kbd {
   pointer-events: none;
   z-index: 20;
   text-align: right;
-  max-width: 40%;
+  max-width: 38%;
 }
 @media (max-width: 640px) {
   .iso-hint {
