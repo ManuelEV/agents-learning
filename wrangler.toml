@@ -1,3 +1,9 @@
+# Worker de solo assets estáticos (sin código de servidor).
+# `name` debe coincidir con el nombre del proyecto en el dashboard de Cloudflare.
 name = "agents-learning"
-pages_build_output_dir = "./dist"
 compatibility_date = "2026-10-01"
+
+[assets]
+directory = "./dist"
+# SPA: cualquier ruta desconocida (/guia/..., /referencias) devuelve index.html
+not_found_handling = "single-page-application"

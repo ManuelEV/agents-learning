@@ -50,28 +50,29 @@ docs/
 
 Para agregar una página: crea `src/content/<slug>.meta.ts`, `src/content/<slug>.mdx` y (opcional) `src/diagrams/<slug>.ts`. Ver [`docs/AUTHORING.md`](docs/AUTHORING.md).
 
-## Despliegue en Cloudflare Pages
+## Despliegue en Cloudflare (Workers con assets estáticos)
 
-Es una SPA estática: Cloudflare Pages sirve `index.html` para cualquier ruta desconocida porque el build **no** incluye un `404.html` (comportamiento SPA por defecto). `public/_headers` agrega caché inmutable para `/assets/*` y cabeceras de seguridad.
+El sitio se publica como un **Worker de solo assets**: no hay código de servidor, solo el contenido de `dist/`. `wrangler.toml` define `[assets] directory = "./dist"` y `not_found_handling = "single-page-application"`, así que cualquier ruta desconocida (`/guia/...`, `/referencias`) devuelve `index.html`. `public/_headers` agrega caché inmutable para `/assets/*` y cabeceras de seguridad.
+
+> El `name` de `wrangler.toml` (`agents-learning`) debe coincidir con el nombre del proyecto en el dashboard. Si le pusiste otro nombre, cámbialo en uno de los dos lados.
 
 ### Opción A — integración con Git (recomendada)
 
 1. Sube el repo a GitHub/GitLab.
-2. Cloudflare Dashboard → **Workers & Pages** → *Create* → *Pages* → *Connect to Git*.
+2. Cloudflare Dashboard → **Workers & Pages** → *Create* → *Import a repository*.
 3. Configuración de build:
-   - **Framework preset**: Vite (o "None")
    - **Build command**: `npm run build`
-   - **Build output directory**: `dist`
+   - **Deploy command**: `npx wrangler deploy` (el valor por defecto)
    - Node: el archivo `.node-version` fija Node 24 (React Router 8 requiere Node ≥ 22.22).
-4. Cada push a `main` despliega a producción; cada rama/PR obtiene una URL de preview.
+4. Cada push a `main` despliega a producción. Si activas los *builds* para otras ramas, el comando de esas ramas es `npx wrangler versions upload` y obtienes una URL de preview.
 
 ### Opción B — Wrangler (despliegue directo)
 
 ```bash
 npx wrangler login
-npm run deploy       # build + wrangler pages deploy dist --project-name agents-learning
+npm run deploy       # build + wrangler deploy
 ```
 
 ### Dominio propio
 
-En el proyecto de Pages → **Custom domains** → *Set up a custom domain* → escribe p. ej. `agentes.tudominio.com`. Si el dominio ya está en Cloudflare, el registro DNS (CNAME) se crea automáticamente y el certificado TLS se emite solo.
+En el Worker → **Settings** → **Domains & Routes** → *Add* → *Custom domain* → escribe p. ej. `agentes.tudominio.com`. Si el dominio ya está en Cloudflare, el registro DNS y el certificado TLS se crean solos.
