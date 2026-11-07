@@ -47,7 +47,9 @@ function NodeView({ b, active, dim, selected, onClick }: { b: Box; active: boole
   const y0 = y - h / 2
   const Icon = node.icon ? ICONS[node.icon] : null
   const round = node.shape === 'person' || node.shape === 'sphere'
-  const tx = x0 + (Icon ? (round ? 46 : 42) : round ? 20 : 16)
+  const pointy = node.shape === 'diamond' || node.shape === 'hex'
+  const inset = round ? 6 : pointy ? (node.shape === 'diamond' ? 12 : 8) : 0
+  const tx = x0 + inset + (Icon ? 42 : 16)
   return (
     <g
       className={`fw-node${active ? ' is-active' : ''}${dim ? ' is-dim' : ''}${selected ? ' is-selected' : ''}`}
@@ -61,7 +63,7 @@ function NodeView({ b, active, dim, selected, onClick }: { b: Box; active: boole
     >
       <NodeShape b={b} />
       {!round && node.shape !== 'diamond' && node.shape !== 'hex' && <rect className="bar" x={x0} y={y0 + 9} width={3.5} height={h - 18} rx={2} />}
-      {Icon && <Icon x={x0 + (round ? 18 : 14)} y={y - 9} width={18} height={18} className="icon" strokeWidth={2.2} />}
+      {Icon && <Icon x={x0 + inset + 14} y={y - 9} width={18} height={18} className="icon" strokeWidth={2.2} />}
       <text className="lbl" x={tx} y={node.sub ? y - 3 : y + 5}>
         {node.label}
       </text>
@@ -92,7 +94,7 @@ export function FlowCanvas({ spec, focus, flows, selected, onSelect, reducedMoti
     <svg
       className="fw-svg"
       viewBox={`0 0 ${L.width} ${L.height}`}
-      style={{ minWidth: Math.min(L.width, 720) }}
+      style={{ minWidth: Math.round(L.width * 0.86) }}
       role="img"
       aria-label={spec.title}
       onClick={() => onSelect(null)}
@@ -164,7 +166,7 @@ export function SequenceCanvas({ spec, step, selected, onSelect, onPickStep, red
     <svg
       className="fw-svg fw-seq"
       viewBox={`0 0 ${L.width} ${L.height}`}
-      style={{ minWidth: Math.min(L.width, 720) }}
+      style={{ minWidth: Math.round(L.width * 0.76) }}
       role="img"
       aria-label={`Diagrama de secuencia: ${spec.title}`}
       onClick={() => onSelect(null)}

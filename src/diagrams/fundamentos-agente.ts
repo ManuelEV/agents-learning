@@ -173,38 +173,210 @@ export const agentLoop: IsoSpec = {
   ],
 }
 
+/** JSON válido y compacto: objetos o arreglos cortos van en una línea, para que el payload quepa en ~50 líneas. */
+const jsonc = (v: unknown, width = 78): string => {
+  const one = (x: unknown) => JSON.stringify(x, null, 1).replace(/\n\s*/g, ' ')
+  const go = (x: unknown, ind: string, used: number): string => {
+    const flat = one(x)
+    if (x === null || typeof x !== 'object' || used + flat.length <= width) return flat
+    if (Array.isArray(x) && x.length === 1 && x[0] && typeof x[0] === 'object') return `[${go(x[0], ind, used + 1)}]`
+    const next = ind + '  '
+    const items = Array.isArray(x)
+      ? x.map((e) => next + go(e, next, next.length))
+      : Object.entries(x as Record<string, unknown>).map(([k, e]) => {
+          const p = next + JSON.stringify(k) + ': '
+          return p + go(e, next, p.length)
+        })
+    return Array.isArray(x) ? `[\n${items.join(',\n')}\n${ind}]` : `{\n${items.join(',\n')}\n${ind}}`
+  }
+  return go(v, '', 0)
+}
+
+/** Workflow: la ruta está escrita en código; los LLMs son pasos acotados dentro de ella. */
+const WF = `import json
+from pydantic import BaseModel, ValidationError
+
+class Reclamo(BaseModel):
+    order_id: str
+    motivo: str        # "retraso" | "dañado" | "otro"
+    pide: str
+    tono: str
+
+MOTIVOS = {"retraso", "dañado", "otro"}
+
+def procesar_reclamo(correo: str) -> dict:
+    # Paso 1 · LLM acotado: SOLO extraer campos a JSON (modelo pequeño)
+    raw = llm(EXTRAER_PROMPT, correo, model="claude-haiku")
+
+    # Paso 2 · gate en código: esquema + reglas de negocio
+    try:
+        r = Reclamo.model_validate_json(raw)
+    except ValidationError as e:
+        return a_revision(correo, motivo=str(e))
+    if r.motivo not in MOTIVOS or not erp.existe_pedido(r.order_id):
+        return a_revision(correo, motivo="pedido o motivo inválido")
+
+    # Paso 3 · LLM con entrada ya validada: redactar la respuesta
+    pedido = erp.estado_pedido(r.order_id)
+    contexto = json.dumps({"reclamo": r.model_dump(), "pedido": pedido})
+    borrador = llm(RESPONDER_PROMPT, contexto, model="claude-sonnet")
+    return {"estado": "borrador_listo", "respuesta": borrador}`
+
+/** Agente: mismo dominio, pero el modelo decide qué herramienta usar y cuándo parar. */
+const AG = `from strands import Agent, tool
+
+@tool
+def get_order_status(order_id: str) -> dict:
+    """Devuelve el estado logístico de un pedido."""
+    return erp.estado_pedido(order_id)
+
+@tool
+def create_ticket(order_id: str, motivo: str, prioridad: str) -> dict:
+    """Crea un ticket de postventa. prioridad: "baja" | "media" | "alta"."""
+    return tickets.crear(order_id=order_id, motivo=motivo, prioridad=prioridad)
+
+agent = Agent(
+    model="global.anthropic.claude-sonnet-5-5",   # perfil de inferencia de Bedrock
+    system_prompt="Resuelves reclamos de pedidos. Usa las herramientas; no inventes datos.",
+    tools=[get_order_status, create_ticket],
+)
+
+# No hay ruta escrita: el modelo elige herramientas, orden y cuándo terminar
+respuesta = agent("Mi pedido 4512 no llega y lo necesito para el viernes. ¿Qué pueden hacer?")`
+
+const CORREO = `De: ana.rojas@correo.cl
+Asunto: Pedido 4512 atrasado
+
+Hola, compré una chaqueta (pedido 4512) y me dijeron que llegaba
+el 1 de noviembre. Hoy es 5 y nada. Necesito una solución o
+quiero mi dinero de vuelta. Ana`
+
+const AG_GOAL = 'Mi pedido 4512 no llega y lo necesito para el viernes. ¿Qué pueden hacer?'
+
 export const workflowVsAgent: IsoSpec = {
   id: 'workflow-vs-agent',
   title: 'Workflow vs. agente',
   summary:
-    'En un **workflow** el código define la ruta: los LLMs son pasos dentro de un flujo predefinido. En un **agente** el LLM decide dinámicamente qué hacer a continuación. La mayoría de los sistemas empresariales combinan ambos.',
+    'En un **workflow** el código define la ruta: los LLMs son pasos dentro de un flujo predefinido. En un **agente** el LLM decide dinámicamente qué hacer a continuación. Arriba, un reclamo por correo recorre siempre los mismos tres pasos; abajo, un agente atiende el mismo tipo de reclamo eligiendo él mismo las herramientas. Compara en cada paso el dato que viaja y quién toma la decisión: `workflow.py` o el modelo.',
   height: 440,
   zones: [
     { id: 'wf', label: 'Workflow (ruta fija)', from: [-1.4, -4.8], to: [9.8, -2.2], tone: 'infra' },
     { id: 'ag', label: 'Agente (ruta dinámica)', from: [-1.4, 0.6], to: [9.8, 5.6], tone: 'agent' },
   ],
   nodes: [
-    { id: 'in1', label: 'Entrada', at: [0, -3.5], shape: 'doc', tone: 'user', icon: 'file', info: 'Un documento o evento entra al flujo.' },
-    { id: 'llm1', label: 'Extraer', sub: 'LLM', at: [2.8, -3.5], shape: 'box', tone: 'model', icon: 'sparkles', info: 'Paso LLM acotado: extraer campos a JSON.' },
-    { id: 'gate', label: 'Validar', sub: 'código', at: [5.6, -3.5], shape: 'diamond', tone: 'guard', icon: 'check', info: 'Gate programático: si la validación falla, se reintenta o se escala.' },
-    { id: 'llm2', label: 'Resumir', sub: 'LLM', at: [8.4, -3.5], shape: 'box', tone: 'model', icon: 'sparkles', info: 'Segundo paso LLM con entrada ya validada.' },
-    { id: 'in2', label: 'Objetivo', at: [0, 3], shape: 'person', tone: 'user', icon: 'user', info: 'El usuario plantea un objetivo abierto.' },
-    { id: 'ag', label: 'Agente', sub: 'LLM en loop', at: [3.4, 3], shape: 'tall', tone: 'agent', icon: 'bot', info: 'Decide qué herramientas usar, en qué orden y cuándo parar.' },
-    { id: 't1', label: 'Buscar', at: [7, 1.6], shape: 'box', tone: 'tool', icon: 'search', info: 'Herramienta disponible; el agente decide si la usa.' },
-    { id: 't2', label: 'Actuar', at: [7, 4.4], shape: 'box', tone: 'tool', icon: 'wrench', info: 'Otra herramienta; el orden no está predefinido.' },
+    { id: 'in1', label: 'Correo de reclamo', sub: 'pedido 4512', at: [0, -3.5], shape: 'doc', tone: 'user', icon: 'mail', info: 'Un reclamo llega por correo. El workflow siempre lo procesa igual, sin importar el contenido.' },
+    { id: 'llm1', label: 'Extraer campos', sub: 'LLM pequeño', at: [2.8, -3.5], shape: 'box', tone: 'model', icon: 'sparkles', info: 'Paso LLM acotado: convierte texto libre en JSON (`order_id`, `motivo`, `pide`, `tono`). Un modelo pequeño basta porque la tarea es simple.' },
+    { id: 'gate', label: 'Validar', sub: 'código', at: [5.6, -3.5], shape: 'diamond', tone: 'guard', icon: 'check', info: 'Gate programático: Pydantic valida el esquema y el código comprueba que el pedido exista. Si falla, el reclamo va a revisión humana en vez de seguir.' },
+    { id: 'llm2', label: 'Redactar respuesta', sub: 'LLM', at: [8.4, -3.5], shape: 'box', tone: 'model', icon: 'sparkles', info: 'Segundo paso LLM con entrada ya validada y el estado real del pedido: redacta un borrador de respuesta.' },
+    { id: 'in2', label: 'Cliente', sub: 'chat web', at: [0, 3], shape: 'person', tone: 'user', icon: 'user', info: 'El cliente plantea un objetivo abierto en el chat: "Mi pedido 4512 no llega, ¿qué pueden hacer?".' },
+    { id: 'ag', label: 'Agente', sub: 'LLM en loop · Strands', at: [3.4, 3], shape: 'tall', tone: 'agent', icon: 'bot', info: 'Decide qué herramientas usar, en qué orden y cuándo parar. El loop lo implementa el framework (aquí Strands sobre Bedrock).' },
+    { id: 't1', label: 'get_order_status', sub: 'lectura · ERP', at: [7, 1.6], shape: 'box', tone: 'tool', icon: 'search', info: 'Herramienta de lectura. El agente decide si la usa; no hay ninguna línea de código que diga "primero consulta el pedido".' },
+    { id: 't2', label: 'create_ticket', sub: 'escritura · tickets', at: [7, 4.4], shape: 'box', tone: 'tool', icon: 'wrench', info: 'Herramienta de escritura. El agente la invoca solo si lo considera necesario, con la prioridad que él elige.' },
   ],
   edges: [
     { from: 'in1', to: 'llm1' },
     { from: 'llm1', to: 'gate' },
-    { from: 'gate', to: 'llm2' },
+    { from: 'gate', to: 'llm2', label: 'ok' },
     { from: 'in2', to: 'ag' },
     { from: 'ag', to: 't1' },
     { from: 'ag', to: 't2' },
   ],
+  code: {
+    wf: { title: 'workflow.py (ilustrativo)', lang: 'python', source: WF },
+    ag: { title: 'agente.py (ilustrativo)', lang: 'python', source: AG },
+  },
   steps: [
-    { title: 'Workflow: ruta definida por código', body: 'Cada paso está escrito de antemano: extraer → validar → resumir. Es **predecible, barato y fácil de evaluar**. Ideal cuando la tarea se descompone en pasos fijos.', flows: ['in1>llm1', 'llm1>gate', 'gate>llm2'] },
-    { title: 'Gates programáticos', body: 'Entre pasos se colocan validaciones en código (esquemas, reglas de negocio). Si fallan, el flujo reintenta o escala a una persona.', focus: ['gate'] },
-    { title: 'Agente: el modelo elige la ruta', body: 'El agente recibe un objetivo y decide sobre la marcha qué herramienta usar. Más **flexible** para tareas abiertas, pero más caro, más lento y más difícil de evaluar.', flows: ['in2>ag', 'ag>t1', 't1>ag', 'ag>t2'] },
-    { title: 'Regla práctica', body: 'Empieza por la solución más simple: una sola llamada al LLM → workflow → agente. Sube de nivel solo cuando la medición muestre que lo necesitas.', focus: ['llm1', 'ag'] },
+    {
+      title: '1 · Workflow: entra el reclamo',
+      body: 'Llega un correo. La función `procesar_reclamo` ya tiene escritos sus tres pasos: lo que diga el correo no cambia la ruta, solo los datos que la recorren.',
+      flows: ['in1>llm1'],
+      data: { title: 'entrada: correo del cliente', lang: 'text', content: CORREO, hl: ['pedido 4512', 'dinero de vuelta'] },
+      code: { file: 'wf', hl: ['def procesar_reclamo'] },
+    },
+    {
+      title: '2 · Paso LLM acotado',
+      body: 'El primer paso hace **una sola cosa**: extraer campos a JSON. Al acotar la tarea, un modelo pequeño y barato rinde bien y el resultado es fácil de verificar.',
+      focus: ['llm1'],
+      data: {
+        title: 'salida del paso 1 (texto JSON del modelo)',
+        lang: 'json',
+        content: json({ order_id: '4512', motivo: 'retraso', pide: 'solución o reembolso', tono: 'molesto' }),
+        hl: ['"order_id"', '"motivo"'],
+      },
+      code: { file: 'wf', hl: ['raw = llm(EXTRAER_PROMPT'] },
+    },
+    {
+      title: '3 · Gate programático',
+      body: 'Antes de gastar otra llamada, el **código** valida el esquema y una regla de negocio (el pedido existe en el ERP). Si algo falla, el reclamo sale del flujo hacia revisión humana con el motivo exacto.',
+      flows: ['llm1>gate'],
+      data: {
+        title: 'resultado del gate (ilustrativo)',
+        lang: 'json',
+        content: json({ schema_ok: true, motivo_valido: true, pedido_existe: true, siguiente: 'redactar' }),
+        hl: ['"schema_ok"', '"pedido_existe"'],
+      },
+      code: { file: 'wf', hl: ['Reclamo.model_validate_json', 'except ValidationError', 'erp.existe_pedido', 'a_revision(correo, motivo="pedido'] },
+    },
+    {
+      title: '4 · Segundo paso LLM',
+      body: 'Con datos validados y el estado real del pedido, otra llamada redacta la respuesta. Siempre son **2 llamadas LLM** por reclamo: costo y latencia predecibles, y cada paso se evalúa por separado.',
+      flows: ['gate>llm2'],
+      data: {
+        title: 'salida del workflow',
+        lang: 'json',
+        content: json({
+          estado: 'borrador_listo',
+          respuesta: 'Hola Ana, lamentamos el retraso del pedido 4512. Hoy está en ruta con entrega estimada el 7 de noviembre. Si prefieres, puedes solicitar la devolución al recibirlo.',
+        }),
+        hl: ['"estado"'],
+      },
+      code: { file: 'wf', hl: ['pedido = erp.estado_pedido', 'borrador = llm(RESPONDER_PROMPT', 'return {"estado": "borrador_listo"'] },
+    },
+    {
+      title: '5 · Agente: objetivo + herramientas',
+      body: 'El agente no recibe pasos, recibe un **objetivo** y un menú de herramientas. Strands envía a Bedrock el mensaje y las definiciones (`toolSpec`) generadas desde las funciones decoradas con `@tool`.',
+      flows: ['in2>ag'],
+      data: {
+        title: 'bedrock.converse(...) que arma Strands (forma simplificada)',
+        lang: 'json',
+        content: jsonc({
+          modelId: 'global.anthropic.claude-sonnet-5-5',
+          system: [{ text: 'Resuelves reclamos de pedidos. Usa las herramientas; no inventes datos.' }],
+          messages: [{ role: 'user', content: [{ text: AG_GOAL }] }],
+          toolConfig: {
+            tools: [
+              { toolSpec: { name: 'get_order_status', description: 'Devuelve el estado logístico de un pedido.', inputSchema: { json: { type: 'object', properties: { order_id: { type: 'string' } }, required: ['order_id'] } } } },
+              { toolSpec: { name: 'create_ticket', description: 'Crea un ticket de postventa.', inputSchema: { json: { type: 'object', properties: { order_id: { type: 'string' }, motivo: { type: 'string' }, prioridad: { type: 'string' } }, required: ['order_id', 'motivo', 'prioridad'] } } } },
+            ],
+          },
+        }),
+        hl: ['"toolConfig"', '"get_order_status"', '"create_ticket"'],
+      },
+      code: { file: 'ag', hl: ['agent = Agent(', 'tools=[get_order_status, create_ticket]', 'respuesta = agent('] },
+    },
+    {
+      title: '6 · El modelo elige la ruta',
+      body: 'Nadie escribió "consulta y luego crea un ticket": el modelo decidió llamar `get_order_status`, leyó el retraso y **eligió** abrir un ticket con prioridad alta. Con otro mensaje podría haber hecho una sola llamada, o tres.',
+      flows: ['ag>t1', 't1>ag', 'ag>t2', 't2>ag'],
+      data: {
+        title: 'messages tras dos vueltas del loop (formato Converse)',
+        lang: 'json',
+        content: jsonc([
+          { role: 'user', content: [{ text: AG_GOAL }] },
+          { role: 'assistant', content: [{ toolUse: { toolUseId: 'tooluse_01', name: 'get_order_status', input: { order_id: '4512' } } }] },
+          { role: 'user', content: [{ toolResult: { toolUseId: 'tooluse_01', content: [{ json: { status: 'retrasado', eta: '2026-11-07' } }] } }] },
+          { role: 'assistant', content: [{ toolUse: { toolUseId: 'tooluse_02', name: 'create_ticket', input: { order_id: '4512', motivo: 'retraso > 3 días', prioridad: 'alta' } } }] },
+          { role: 'user', content: [{ toolResult: { toolUseId: 'tooluse_02', content: [{ json: { ticket_id: 'TCK-88231' } }] } }] },
+        ]),
+        hl: ['"toolUse"', '"toolResult"', '"prioridad"'],
+      },
+      code: { file: 'ag', hl: ['def get_order_status', 'def create_ticket'] },
+    },
+    {
+      title: '7 · Regla práctica',
+      body: 'El workflow hace siempre 2 llamadas; el agente hizo 3 en este caso y puede hacer más en otro. Empieza por lo más simple: **una llamada → workflow → agente**, y sube de nivel solo cuando una medición muestre que lo necesitas.',
+      focus: ['llm1', 'ag'],
+      code: { file: 'ag', hl: ['# No hay ruta escrita'] },
+    },
   ],
 }

@@ -193,12 +193,12 @@
   fill: var(--text);
   font-family: var(--font-display);
   font-weight: 600;
-  font-size: 13.5px;
+  font-size: 14px;
 }
 .fw-node .sub {
   fill: var(--text-3);
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 11px;
 }
 .fw-node:hover .box {
   stroke: var(--tone);

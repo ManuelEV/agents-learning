@@ -36,10 +36,14 @@ export type FlowLayout = { width: number; height: number; boxes: Map<string, Box
 
 const MARGIN = 26
 
+/** Relleno horizontal extra por forma (los extremos redondeados o en punta comen espacio). */
+const SHAPE_PAD: Partial<Record<NonNullable<IsoNode['shape']>, number>> = { person: 22, sphere: 22, diamond: 30, hex: 24, cloud: 10, stack: 6, cylinder: 6, doc: 6 }
+
 export function nodeSize(n: IsoNode): { w: number; h: number } {
-  const lbl = n.label.length * 7.5
-  const sub = (n.sub?.length ?? 0) * 6.2
-  const w = Math.min(240, Math.max(112, Math.ceil(Math.max(lbl, sub)) + (n.icon ? 52 : 28)))
+  const lbl = n.label.length * 7.9
+  const sub = (n.sub?.length ?? 0) * 6.7
+  const pad = SHAPE_PAD[n.shape ?? 'box'] ?? 0
+  const w = Math.min(270, Math.max(112, Math.ceil(Math.max(lbl, sub)) + (n.icon ? 54 : 30) + pad))
   return { w, h: n.sub ? 52 : 40 }
 }
 
@@ -107,49 +111,154 @@ function arcEdge(a: Box, b: Box, bend: number) {
   return { d: `M${p1.x},${p1.y} Q${c.x},${c.y} ${p2.x},${p2.y}`, arrow: arrowHead(p2, c), mid }
 }
 
-function orthoEdge(a: Box, b: Box, route: 'x' | 'z') {
+/** Rutas ortogonales candidatas de a → b, en orden de preferencia. */
+function orthoCandidates(a: Box, b: Box, route: 'x' | 'z'): Pt[][] {
   const dx = b.x - a.x
   const dy = b.y - a.y
   const sx = Math.sign(dx) || 1
   const sy = Math.sign(dy) || 1
-  // ¿se solapan en vertical? → línea horizontal recta
   const yLo = Math.max(a.y - a.h / 2, b.y - b.h / 2)
   const yHi = Math.min(a.y + a.h / 2, b.y + b.h / 2)
   const xLo = Math.max(a.x - a.w / 2, b.x - b.w / 2)
   const xHi = Math.min(a.x + a.w / 2, b.x + b.w / 2)
-  let pts: Pt[]
+  const out: Pt[][] = []
+  // recta horizontal o vertical si las cajas se solapan en el otro eje
   if (yHi - yLo > 10 && Math.abs(dx) > (a.w + b.w) / 2) {
     const y = Math.abs(dy) < 6 ? a.y : (yLo + yHi) / 2
-    pts = [
+    out.push([
       { x: a.x + (sx * a.w) / 2, y },
       { x: b.x - (sx * b.w) / 2, y },
-    ]
+    ])
   } else if (xHi - xLo > 16 && Math.abs(dy) > (a.h + b.h) / 2) {
     const x = Math.abs(dx) < 6 ? a.x : (xLo + xHi) / 2
-    pts = [
+    out.push([
       { x, y: a.y + (sy * a.h) / 2 },
       { x, y: b.y - (sy * b.h) / 2 },
-    ]
-  } else if (route === 'z') {
-    pts = [
-      { x: a.x, y: a.y + (sy * a.h) / 2 },
-      { x: a.x, y: b.y },
-      { x: b.x - (sx * b.w) / 2, y: b.y },
-    ]
-  } else {
-    pts = [
-      { x: a.x + (sx * a.w) / 2, y: a.y },
-      { x: b.x, y: a.y },
-      { x: b.x, y: b.y - (sy * b.h) / 2 },
-    ]
+    ])
   }
+  const xFirst: Pt[] = [
+    { x: a.x + (sx * a.w) / 2, y: a.y },
+    { x: b.x, y: a.y },
+    { x: b.x, y: b.y - (sy * b.h) / 2 },
+  ]
+  const zFirst: Pt[] = [
+    { x: a.x, y: a.y + (sy * a.h) / 2 },
+    { x: a.x, y: b.y },
+    { x: b.x - (sx * b.w) / 2, y: b.y },
+  ]
+  if (route === 'z') out.push(zFirst, xFirst)
+  else out.push(xFirst, zFirst)
+  // en "Z": horizontal → vertical en el punto medio → horizontal (y la variante vertical)
+  if (Math.abs(dx) > (a.w + b.w) / 2 + 20) {
+    const mx = (a.x + sx * (a.w / 2) + b.x - sx * (b.w / 2)) / 2
+    out.push([
+      { x: a.x + (sx * a.w) / 2, y: a.y },
+      { x: mx, y: a.y },
+      { x: mx, y: b.y },
+      { x: b.x - (sx * b.w) / 2, y: b.y },
+    ])
+  }
+  if (Math.abs(dy) > (a.h + b.h) / 2 + 20) {
+    const my = (a.y + sy * (a.h / 2) + b.y - sy * (b.h / 2)) / 2
+    out.push([
+      { x: a.x, y: a.y + (sy * a.h) / 2 },
+      { x: a.x, y: my },
+      { x: b.x, y: my },
+      { x: b.x, y: b.y - (sy * b.h) / 2 },
+    ])
+  }
+  return out
+}
+
+/** ¿El segmento p→q cruza el rectángulo? (Liang–Barsky) */
+function segHitsRect(p: Pt, q: Pt, l: number, t: number, r: number, btm: number): boolean {
+  let t0 = 0
+  let t1 = 1
+  const dx = q.x - p.x
+  const dy = q.y - p.y
+  const tests: [number, number][] = [
+    [-dx, p.x - l],
+    [dx, r - p.x],
+    [-dy, p.y - t],
+    [dy, btm - p.y],
+  ]
+  for (const [pp, qq] of tests) {
+    if (pp === 0) {
+      if (qq < 0) return false
+    } else {
+      const u = qq / pp
+      if (pp < 0) t0 = Math.max(t0, u)
+      else t1 = Math.min(t1, u)
+      if (t0 > t1) return false
+    }
+  }
+  return true
+}
+
+function collisions(pts: Pt[], boxes: Box[], skip: Set<string>): number {
+  let n = 0
+  for (const bx of boxes) {
+    if (skip.has(bx.id)) continue
+    const l = bx.x - bx.w / 2 - 6
+    const r = bx.x + bx.w / 2 + 6
+    const t = bx.y - bx.h / 2 - 6
+    const btm = bx.y + bx.h / 2 + 6
+    for (let i = 1; i < pts.length; i++)
+      if (segHitsRect(pts[i - 1], pts[i], l, t, r, btm)) {
+        n++
+        break
+      }
+  }
+  return n
+}
+
+function finishOrtho(pts: Pt[]) {
+  const p = pts.map((x) => ({ ...x }))
   // separa la punta del borde para que la flecha no lo pise
-  const last = pts[pts.length - 1]
-  const prev = pts[pts.length - 2]
+  const last = p[p.length - 1]
+  const prev = p[p.length - 2]
   const l = Math.hypot(last.x - prev.x, last.y - prev.y) || 1
   const tip = { x: last.x - ((last.x - prev.x) / l) * 3, y: last.y - ((last.y - prev.y) / l) * 3 }
-  pts[pts.length - 1] = tip
-  return { d: roundedPath(pts), arrow: arrowHead(tip, prev), mid: longestMid(pts) }
+  p[p.length - 1] = tip
+  return { d: roundedPath(p), arrow: arrowHead(tip, prev), mid: longestMid(p) }
+}
+
+function arcSamples(a: Box, b: Box, bend: number): Pt[] {
+  const mx = (a.x + b.x) / 2
+  const my = (a.y + b.y) / 2
+  const dx = b.x - a.x
+  const dy = b.y - a.y
+  const len = Math.hypot(dx, dy) || 1
+  const off = Math.max(40, len * 0.22) * bend
+  const c = { x: mx + (-dy / len) * off, y: my + (dx / len) * off }
+  const p1 = borderPoint(a, c)
+  const p2 = borderPoint(b, c)
+  const out: Pt[] = []
+  for (let i = 0; i <= 12; i++) {
+    const t = i / 12
+    out.push({ x: (1 - t) ** 2 * p1.x + 2 * (1 - t) * t * c.x + t * t * p2.x, y: (1 - t) ** 2 * p1.y + 2 * (1 - t) * t * c.y + t * t * p2.y })
+  }
+  return out
+}
+
+/** Elige la ruta con menos cruces sobre otras cajas: la declarada si está libre. */
+function routeEdge(a: Box, b: Box, route: 'x' | 'z' | 'arc' | undefined, all: Box[]) {
+  const skip = new Set([a.id, b.id])
+  if (route === 'arc') return arcEdge(a, b, 1)
+  let best: Pt[] | null = null
+  let bestHits = Infinity
+  for (const c of orthoCandidates(a, b, route === 'z' ? 'z' : 'x')) {
+    const h = collisions(c, all, skip)
+    if (h < bestHits) {
+      best = c
+      bestHits = h
+      if (h === 0) break
+    }
+  }
+  if (bestHits > 0) {
+    for (const bend of [1, -1]) if (collisions(arcSamples(a, b, bend), all, skip) === 0) return arcEdge(a, b, bend)
+  }
+  return finishOrtho(best!)
 }
 
 export function flowLayout(spec: IsoSpec): FlowLayout {
@@ -236,12 +345,13 @@ export function flowLayout(spec: IsoSpec): FlowLayout {
 
   const edges: EdgePath[] = []
   const seen = new Set<string>()
+  const allBoxes = [...boxes.values()]
   spec.edges.forEach((e, i) => {
     const a = boxes.get(e.from)
     const b = boxes.get(e.to)
     if (!a || !b) return
     seen.add(`${e.from}>${e.to}`)
-    const g = e.route === 'arc' ? arcEdge(a, b, 1) : orthoEdge(a, b, e.route === 'z' ? 'z' : 'x')
+    const g = routeEdge(a, b, e.route, allBoxes)
     edges.push({ key: `e${i}`, from: e.from, to: e.to, ...g, label: e.label, dashed: e.dashed })
   })
   // flujos de los pasos sin arista declarada → curva temporal punteada
@@ -253,7 +363,9 @@ export function flowLayout(spec: IsoSpec): FlowLayout {
       const b = boxes.get(to)
       if (!a || !b) continue
       seen.add(`${from}>${to}`)
-      edges.push({ key: `t${from}>${to}`, from, to, ...arcEdge(a, b, -1), dashed: true, temp: true })
+      const skip = new Set([from, to])
+      const bend = collisions(arcSamples(a, b, -1), allBoxes, skip) <= collisions(arcSamples(a, b, 1), allBoxes, skip) ? -1 : 1
+      edges.push({ key: `t${from}>${to}`, from, to, ...arcEdge(a, b, bend), dashed: true, temp: true })
     }
 
   return { width: maxX - minX + MARGIN * 2, height: maxY - minY + MARGIN * 2, boxes, zones, edges }
@@ -274,7 +386,7 @@ export function sequenceLayout(spec: IsoSpec): SeqLayout {
     ? spec.lanes.map((id) => spec.nodes.find((n) => n.id === id)).filter((n): n is IsoNode => !!n)
     : [...spec.nodes].sort((a, b) => a.at[0] - b.at[0] || a.at[1] - b.at[1])
   const n = order.length
-  const width = Math.max(760, n * 158)
+  const width = Math.max(760, n * 146)
   const mx = 84
   const lanes = order.map((node, i) => ({ id: node.id, node, x: n === 1 ? width / 2 : mx + (i * (width - 2 * mx)) / (n - 1) }))
   const laneW = Math.min(148, (width - 2 * mx) / Math.max(1, n - 1) - 12)

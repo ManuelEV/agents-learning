@@ -1,6 +1,6 @@
 # Cómo construir agentes de IA a nivel empresarial
 
-Guía práctica (en español), pensada para cualquier equipo, sobre cómo construir **agentes de IA en entornos empresariales**: frameworks (Google ADK, Strands, LangGraph, …), RAG, MCP, A2A, AI gateways, plataformas cloud (Bedrock AgentCore, Gemini Enterprise Agent Platform, Microsoft Foundry, Cloudflare), arquitecturas de referencia, **casos reales** de empresas que operan agentes a escala y prácticas de producción (evals, observabilidad, seguridad). Incluye una ruta de aprendizaje de 7 niveles y **diagramas isométricos 3D interactivos** que explican cada flujo paso a paso, con referencias a fuentes oficiales.
+Guía práctica (en español), pensada para cualquier equipo, sobre cómo construir **agentes de IA en entornos empresariales**: frameworks (Google ADK, Strands, LangGraph, …), RAG, MCP, A2A, AI gateways, plataformas cloud (Bedrock AgentCore, Gemini Enterprise Agent Platform, Microsoft Foundry, Cloudflare), arquitecturas de referencia, **casos reales** de empresas que operan agentes a escala y prácticas de producción (evals, observabilidad, seguridad). Incluye una ruta de aprendizaje de 7 niveles y **diagramas interactivos paso a paso**: cada paso resalta las piezas que participan, muestra el payload real que viaja (JSON-RPC, `messages`, HTTP, trazas) y las líneas de código que lo producen, con vista 3D opcional y referencias a fuentes oficiales.
 
 Contenido verificado contra documentación oficial a **octubre de 2026**. La investigación base está en [`docs/research/`](docs/research/).
 
@@ -38,7 +38,8 @@ node scripts/check-mdx.mjs        # compila todos los MDX y detecta componentes 
 src/
   content/            <slug>.mdx (cuerpo) + <slug>.meta.ts (título, sección, referencias)
   diagrams/           specs IsoSpec por página (se registran solos por glob)
-  components/iso/     motor de diagramas isométricos (R3F, cámara ortográfica isométrica)
+  components/flow/    recorridos 2D (flujo y secuencia) con paneles de datos y código
+  components/iso/     tipos de las specs y vista 3D isométrica opcional (R3F)
   components/mdx/     Callout, Cards, CodeTabs, Steps, KeyPoints, Roadmap, CodeBlock…
   components/layout/  layout, sidebar, buscador (Ctrl K)
   pages/              Home, artículo, referencias, 404

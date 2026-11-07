@@ -31,8 +31,8 @@ export function HomePage() {
           </h1>
           <p>
             Un mapa de las opciones reales para construir agentes —frameworks, RAG, MCP, A2A, gateways y plataformas cloud—, cómo
-            funcionan por dentro y cómo combinarlos con buenas prácticas de producción. Cada concepto viene con diagramas
-            isométricos interactivos paso a paso y referencias a la fuente oficial.
+            funcionan por dentro y cómo combinarlos con buenas prácticas de producción. Cada concepto viene con un diagrama
+            interactivo paso a paso que muestra el dato que viaja y el código que lo produce, con referencias a la fuente oficial.
           </p>
           <div className="hero-cta">
             <Link to="/guia/ruta-de-aprendizaje" className="btn btn-primary">

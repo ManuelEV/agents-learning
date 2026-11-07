@@ -103,6 +103,27 @@ export default function Walkthrough({ specs }: { specs: IsoSpec[] }) {
   }, [])
 
   const focus = useMemo(() => (step >= 0 ? stepFocus(spec, step) : null), [spec, step])
+
+  // si el diagrama no cabe (móvil), desplaza el lienzo hacia lo que está activo
+  const scroller = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const sc = scroller.current
+    if (!sc || sc.scrollWidth <= sc.clientWidth + 4) return
+    const els = sc.querySelectorAll<SVGGraphicsElement>('.fw-node.is-active, .fw-lane.is-active .head')
+    if (!els.length) {
+      if (step < 0) sc.scrollTo({ left: 0, behavior: 'smooth' })
+      return
+    }
+    const base = sc.getBoundingClientRect().left
+    let l = Infinity
+    let r = -Infinity
+    els.forEach((el) => {
+      const b = el.getBoundingClientRect()
+      l = Math.min(l, b.left - base + sc.scrollLeft)
+      r = Math.max(r, b.right - base + sc.scrollLeft)
+    })
+    sc.scrollTo({ left: Math.max(0, (l + r) / 2 - sc.clientWidth / 2), behavior: 'smooth' })
+  }, [step, tab, selected, view])
   const flows = current?.flows ?? []
   const nodeById = useMemo(() => new Map(spec.nodes.map((n) => [n.id, n])), [spec])
   const selectedNode = selected ? nodeById.get(selected) : null
@@ -174,7 +195,7 @@ export default function Walkthrough({ specs }: { specs: IsoSpec[] }) {
 
       <div className="fw-stage">
         {view === '2d' ? (
-          <div className="fw-scroll">{sequence ? <SequenceCanvas {...canvasProps} /> : <FlowCanvas {...canvasProps} />}</div>
+          <div className="fw-scroll" ref={scroller}>{sequence ? <SequenceCanvas {...canvasProps} /> : <FlowCanvas {...canvasProps} />}</div>
         ) : (
           <Suspense fallback={<div className="iso-placeholder" style={{ minHeight: h3d }}>Cargando vista 3D…</div>}>
             <Iso3D spec={spec} focus={focus} flows={flows} selected={selected} onSelect={setSelected} height={h3d} compact={compact} reducedMotion={reducedMotion} />

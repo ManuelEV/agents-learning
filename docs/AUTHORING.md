@@ -99,7 +99,7 @@ node scripts/check-diagrams.mjs src/diagrams/<slug>.ts   # 0 errores (incluye qu
 node scripts/check-mdx.mjs src/content/<slug>.mdx        # compila el MDX y detecta componentes desconocidos
 npx tsc --noEmit                                         # tipos de meta y diagramas
 ```
-Las advertencias marcadas `[3D]` solo afectan a la vista 3D opcional. No ejecutes `vite build` ni `vite dev` (los corre el integrador). No edites archivos compartidos (`src/components`, `src/lib`, `styles.css`, otras páginas).
+Las advertencias marcadas `[3D]` solo afectan a la vista 3D opcional. Ejecutado sin argumentos, el validador regenera `src/diagrams/manifest.ts` (id → archivo), que permite cargar en cada página solo los diagramas que usa: córrelo así antes de hacer commit si agregaste o renombraste specs. No ejecutes `vite build` ni `vite dev` (los corre el integrador). No edites archivos compartidos (`src/components`, `src/lib`, `styles.css`, otras páginas).
 
 ## Estilo de contenido
 

@@ -44,13 +44,7 @@ export default defineConfig({
     tailwindcss(),
   ],
   build: {
-    chunkSizeWarningLimit: 1200,
-    rollupOptions: {
-      output: {
-        manualChunks(id) {
-          if (/node_modules[\/](three|@react-three)[\/]/.test(id)) return 'three'
-        },
-      },
-    },
+    // three.js queda solo en el chunk diferido de la vista 3D (Iso3D): no se descarga si nadie la activa.
+    chunkSizeWarningLimit: 1300,
   },
 })

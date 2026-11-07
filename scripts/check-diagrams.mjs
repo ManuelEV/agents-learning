@@ -1,13 +1,13 @@
 // Valida las specs de src/diagrams/*.ts sin navegador.
 // Uso: node scripts/check-diagrams.mjs [archivo.ts ...]
 // Requiere Node >= 23.6 (type stripping). Los archivos de diagramas solo deben usar `import type`.
-import { readdirSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { basename, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const dir = resolve('src/diagrams')
 const args = process.argv.slice(2)
-const files = args.length ? args.map((a) => resolve(a)) : readdirSync(dir).filter((f) => f.endsWith('.ts') && f !== 'index.ts').map((f) => join(dir, f))
+const files = args.length ? args.map((a) => resolve(a)) : readdirSync(dir).filter((f) => f.endsWith('.ts') && f !== 'index.ts' && f !== 'manifest.ts').map((f) => join(dir, f))
 
 const HEIGHT = { box: 0.75, tall: 1.45, cylinder: 0.9, stack: 0.85, sphere: 1.45, person: 1.25, diamond: 1.25, hex: 0.55, doc: 0.5, cloud: 0.8 }
 const W = 820
@@ -161,6 +161,18 @@ for (const file of files) {
     console.log(
       `✓ ${tag} ${spec.layout === 'sequence' ? 'secuencia · ' : ''}${spec.nodes.length} nodos, ${spec.edges.length} aristas, ${spec.steps.length} pasos · datos ${withData}/${spec.steps.length} · código ${withCode}/${spec.steps.length} · zoom3D ${zoom.toFixed(1)}`,
     )
+  }
+}
+// Manifiesto id → archivo para la carga diferida (src/diagrams/index.ts). Se regenera al validar todos los archivos.
+if (!args.length && !errors) {
+  const entries = [...seen.entries()].map(([id, file]) => [id, basename(file, '.ts')]).sort((a, b) => a[0].localeCompare(b[0]))
+  const body = entries.map(([id, f]) => `  '${id}': '${f}',`).join('\n')
+  const out = `// Generado por scripts/check-diagrams.mjs — no editar a mano.\nexport const DIAGRAM_FILES: Record<string, string> = {\n${body}\n}\n`
+  const path = join(dir, 'manifest.ts')
+  const prev = existsSync(path) ? readFileSync(path, 'utf8').replace(/\r\n/g, '\n') : ''
+  if (prev !== out) {
+    writeFileSync(path, out)
+    console.log(`↻ src/diagrams/manifest.ts actualizado (${entries.length} diagramas)`)
   }
 }
 console.log(`\n${errors} errores, ${warnings} advertencias`)
