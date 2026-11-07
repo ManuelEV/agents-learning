@@ -11,7 +11,7 @@ class DiagramBoundary extends Component<{ children: ReactNode }, { error: boolea
     if (this.state.error) {
       return (
         <div className="iso-error">
-          No se pudo renderizar el diagrama 3D (¿WebGL desactivado?). El contenido del artículo sigue siendo válido.
+          No se pudo renderizar el diagrama. El contenido del artículo sigue siendo válido.
         </div>
       )
     }
@@ -23,13 +23,13 @@ function Placeholder({ height }: { height: number }) {
   return (
     <div className="iso-placeholder" style={{ minHeight: height }}>
       <div className="iso-placeholder-cube" />
-      <span>Cargando diagrama 3D…</span>
+      <span>Cargando diagrama…</span>
     </div>
   )
 }
 
 /**
- * Diagrama isométrico interactivo para usar en MDX.
+ * Diagrama interactivo paso a paso para usar en MDX (2D por defecto, 3D opcional).
  * `<Diagram id="agent-loop" />` o, con pestañas, `<Diagram ids={["a", "b"]} />`.
  */
 export function Diagram({ id, ids, height = 660 }: { id?: string; ids?: string[]; height?: number }) {

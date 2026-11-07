@@ -24,7 +24,7 @@ Entre 6 y 15 por artículo, priorizando fuentes primarias (docs oficiales, espec
 
 ## Componentes disponibles en MDX (no importes nada)
 
-- `<Diagram id="..." />` o `<Diagram ids={["a","b"]} />` (pestañas). Opcional `height={620}` (alto del placeholder). **Máximo 4 `<Diagram>` por página** (cada uno es un contexto WebGL).
+- `<Diagram id="..." />` o `<Diagram ids={["a","b"]} />` (pestañas). Opcional `height={620}` (alto del placeholder). Recorrido 2D paso a paso con paneles de datos y código; la vista 3D es opcional.
 - `<Callout type="info|tip|warning|danger|success" title="opcional">…markdown…</Callout>`
 - `<Cards cols={2|3}>` + `<Card title="" tag="opcional" href="/guia/slug | https://...">texto</Card>`
 - `<CodeTabs labels={["ADK","Strands"]}>` + un bloque de código por pestaña (dejar líneas en blanco alrededor de cada bloque).
@@ -36,39 +36,70 @@ Entre 6 y 15 por artículo, priorizando fuentes primarias (docs oficiales, espec
 
 Reglas MDX: escapa `{` `}` y `<` en texto plano (usa `` `código` `` o `&lt;`). No uses HTML con `class=`; usa los componentes. Los encabezados `##` y `###` generan el índice lateral.
 
-## Diagramas isométricos (`IsoSpec`)
+## Diagramas interactivos (`IsoSpec`)
 
-Tipos en `src/components/iso/types.ts`. Ejemplos: `src/diagrams/inicio.ts`, `src/diagrams/fundamentos-agente.ts`.
+Tipos en `src/components/iso/types.ts`. Motor 2D en `src/components/flow/` (por defecto) y vista 3D opcional (`src/components/iso/`, botón **3D**). **Ejemplos de referencia**: `agent-loop` en `src/diagrams/fundamentos-agente.ts` (flujo + `messages` + código) y `mcp-mrtr` en `src/diagrams/mcp.ts` (secuencia + JSON-RPC + código).
 
-**Coordenadas**: `at: [x, z]`. La cámara es isométrica real:
-- `+x` avanza **abajo-derecha** en pantalla → úsalo como eje principal del flujo.
-- `+z` avanza **abajo-izquierda**; `-z` va **arriba-derecha** → úsalo para ramas/carriles.
-- Separación entre nodos: **3.0–3.5** en el eje del flujo, **3.2–3.5** entre carriles. Mínimo absoluto 2.2 (el validador falla).
-- Un flujo de 4–5 nodos en `x` llena bien un lienzo ancho. Evita diagramas "altos": combina `x` con `-z`.
-- 5–12 nodos por diagrama; 4–8 pasos.
+### La idea: diagrama ↔ dato ↔ código
 
-**Formas** (`shape`): `box` (servicio, por defecto), `tall` (agente/servidor), `cylinder` (BD/memoria), `stack` (vector store/índice), `sphere` (modelo LLM), `person` (usuario), `diamond` (decisión/router/gate), `hex` (gateway/proxy), `doc` (documentos/prompt/contexto), `cloud` (servicio externo/SaaS).
+Cada diagrama es un **recorrido paso a paso** con tres vistas sincronizadas:
 
-**Tonos** (`tone`, color semántico): `user`, `agent`, `model`, `tool`, `data`, `gateway`, `infra`, `guard`, `protocol`, `memory`, `neutral`.
+1. **El diagrama** resalta qué piezas participan y anima el paquete que viaja (`flows`).
+2. **Datos**: el payload real que viaja en ese paso (`data`): el cuerpo HTTP, la respuesta JSON-RPC, el arreglo `messages`, un span de OpenTelemetry, el YAML de configuración, el SQL generado…
+3. **Código**: las líneas que producen ese paso (`code`), resaltadas sobre un archivo de 15–50 líneas (`spec.code`).
+
+El objetivo es que el lector **vea cómo se refleja cada concepto en el código y en los datos**, no solo en una caja. Usa formatos reales (Messages API de Anthropic: `tool_use`/`tool_result`/`stop_reason`; Bedrock Converse: `toolUse`/`toolResult`/`stopReason`; MCP: JSON-RPC 2.0 `tools/list`, `tools/call`; A2A: Agent Card, `message/send`, estados de Task; OpenTelemetry GenAI: `gen_ai.*`). Si algo está simplificado, dilo en el `title` del dato ("forma simplificada") o en el `body`. No inventes APIs: si no estás seguro de un nombre de campo, usa uno que aparezca en el propio artículo o en `docs/research/`.
+
+### Tipo de diagrama (`layout`)
+
+- `flow` (por defecto): cajas y flechas. Para **arquitecturas** y componentes.
+- `sequence`: un carril vertical por nodo y una fila por cada flujo, en orden. Para **protocolos e intercambios** (MCP, A2A, OAuth, handoffs, request/response a través de gateways). Opcional `lanes: ['id1', 'id2', …]` para fijar el orden de los carriles (por defecto, `at[0]`). Cada paso debería tener 1–4 flujos; un paso sin flujos se dibuja como nota sobre su `focus`. Máximo ~20 filas en total.
+
+### Coordenadas y nodos
+
+**Coordenadas**: `at: [x, z]`. En 2D, `x` es horizontal (izquierda → derecha) y `z` vertical (arriba → abajo); la escala se calcula sola para que las cajas no se solapen. En 3D la cámara es isométrica (`+x` abajo-derecha, `-z` arriba-derecha).
+- Separación: **3.0–3.5** en el eje del flujo, **3.2–3.5** entre carriles. Mínimo 2.2 (el validador falla).
+- Un flujo principal en `x` con ramas en `±z` se lee bien en ambas vistas. 5–12 nodos; 4–8 pasos.
+
+**Formas** (`shape`): `box` (servicio), `tall` (agente/servidor), `cylinder` (BD/memoria), `stack` (vector store/índice), `sphere` (modelo LLM), `person` (usuario), `diamond` (decisión/router/gate), `hex` (gateway/proxy), `doc` (documentos/prompt/contexto), `cloud` (servicio externo/SaaS).
+
+**Tonos** (`tone`): `user`, `agent`, `model`, `tool`, `data`, `gateway`, `infra`, `guard`, `protocol`, `memory`, `neutral`.
 
 **Iconos** (`icon`): user, users, bot, brain, wrench, database, network, shield, server, cloud, file, search, layers, workflow, key, eye, branch, message, gauge, cpu, globe, lock, boxes, scroll, plug, router, sparkles, book, timer, check, code, mail, chart, list, repeat, split, merge, flag, hand, zap, terminal, card, link, filter, trophy, graduation.
 
-**Textos**: `label` ≤ 22 caracteres; detalles en `sub` (≤ 26). `info` (obligatorio en la práctica) = 1–3 frases que se muestran al hacer clic. En `body`/`summary`/`info` se admite `` `código` ``, `**negrita**` y `*cursiva*`.
+**Textos**: `label` ≤ 22 caracteres; detalles en `sub` (≤ 26). `info` = 1–3 frases al hacer clic. En `body`/`summary`/`info` se admite `` `código` ``, `**negrita**` y `*cursiva*`.
 
-**Aristas**: `{ from, to, label?, route?: 'x'|'z'|'arc', dashed? }`. Por defecto la ruta va primero por `x` y luego por `z` (estilo "pistas" isométricas). `arc` dibuja un arco aéreo (útil para conexiones largas o de retorno).
+**Aristas**: `{ from, to, label?, route?: 'x'|'z'|'arc', dashed? }`. `x`: primero horizontal; `z`: primero vertical; `arc`: curva.
 
-**Zonas**: `{ id, label, from:[x0,z0], to:[x1,z1], tone }` — rectángulo en el suelo (cuenta, VPC, nube, runtime). La etiqueta va en la esquina izquierda `(x0, z1)`.
+**Zonas**: `{ id, label, from:[x0,z0], to:[x1,z1], tone }` (cuenta, VPC, runtime). En 2D se amplían solas para contener sus nodos.
 
-**Pasos**: `{ title, body, flows?: ['a>b', ...], focus?: ['id', ...] }`. `flows` anima partículas en el sentido indicado (si existe la arista inversa se recorre al revés; si no existe arista, se dibuja un arco temporal). Si no hay `focus`, se resaltan los extremos de los flujos.
+### Pasos
+
+```ts
+{
+  title: '3 · El modelo decide',
+  body: '1–3 frases: qué pasa y por qué importa.',
+  flows: ['agent>model', 'model>agent: tool_use'],   // "a>b" o "a>b: etiqueta" (la etiqueta se ve en secuencia y en las píldoras)
+  focus: ['agent'],                                  // opcional: si falta, se resaltan los extremos de flows
+  data: { title: 'respuesta de la API', lang: 'json', content: json({...}), hl: ['"stop_reason"'] },
+  code: { file: 'agent', hl: ['messages.append(', 'if not response.tool_calls'] },
+}
+```
+
+- `data` (pestaña Datos): un payload `{ title, lang, content, hl? }` con `lang` ∈ `json | http | yaml | python | ts | bash | text`, o el arreglo de mensajes `{ title, messages: ApiMessage[], hl?: number[], newFrom?: number }` (bloques `text`, `tool_use`, `tool_result`). `hl` del payload = textos cuyas líneas se resaltan (deben existir). Construye el JSON con un helper `const json = (v: unknown) => JSON.stringify(v, null, 2)` para que sea válido. ≤ 50 líneas. Para HTTP, incluye método, ruta, headers relevantes y cuerpo.
+- `code` (pestaña Código): `hl` = textos (o números de línea) del archivo `spec.code[file]`; sin `file` se usa el primero. Cada texto debe aparecer en el archivo (el validador falla si no).
+- `spec.code`: `{ clave: { title: 'archivo.py', lang: 'python', source: \`...\` } }`. 15–50 líneas. **Si la página ya tiene un bloque de código para ese flujo, reutilízalo literalmente** (mismo título) para que diagrama y artículo cuenten lo mismo. Si no lo hay, escribe un fragmento ilustrativo realista y márcalo en el título: `'pipeline.py (ilustrativo)'`. Puedes declarar 2–3 archivos (p. ej. `agent.py` y `config.yaml`); el lector los alterna.
+- No todos los pasos necesitan `data` o `code`, pero apunta a que **la mayoría** tenga al menos uno. Un diagrama de casos/empresa puede usar datos ilustrativos (petición, traza, política, resultado de eval) marcados como tales.
+- En template strings de `source` escapa `` ` `` y `${`.
 
 ## Validación (obligatoria antes de terminar)
 
 ```bash
-node scripts/check-diagrams.mjs src/diagrams/<slug>.ts   # 0 errores; resuelve advertencias de solape/zoom cuando puedas
+node scripts/check-diagrams.mjs src/diagrams/<slug>.ts   # 0 errores (incluye que cada code.hl / data.hl exista)
 node scripts/check-mdx.mjs src/content/<slug>.mdx        # compila el MDX y detecta componentes desconocidos
 npx tsc --noEmit                                         # tipos de meta y diagramas
 ```
-No ejecutes `vite build` ni `vite dev` (los corre el integrador). No edites archivos compartidos (`src/components`, `src/lib`, `styles.css`, otras páginas).
+Las advertencias marcadas `[3D]` solo afectan a la vista 3D opcional. No ejecutes `vite build` ni `vite dev` (los corre el integrador). No edites archivos compartidos (`src/components`, `src/lib`, `styles.css`, otras páginas).
 
 ## Estilo de contenido
 

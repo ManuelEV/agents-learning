@@ -49,7 +49,7 @@ import {
 } from 'lucide-react'
 import type { IconName } from './types'
 
-const ICONS: Record<IconName, LucideIcon> = {
+export const ICONS: Record<IconName, LucideIcon> = {
   user: User,
   users: Users,
   bot: Bot,

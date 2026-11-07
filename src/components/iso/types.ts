@@ -113,13 +113,58 @@ export interface IsoEdge {
   dashed?: boolean
 }
 
+/** Lenguajes del resaltador del panel de código. */
+export type CodeLang = 'python' | 'ts' | 'js' | 'json' | 'bash' | 'http' | 'yaml' | 'text'
+
+/** Archivo de código que el diagrama recorre paso a paso. */
+export interface CodeFile {
+  title: string
+  lang: CodeLang
+  source: string
+}
+
+/** Bloques de la Messages API (Anthropic). Otros proveedores usan nombres distintos, misma idea. */
+export type MsgBlock =
+  | { type: 'text'; text: string }
+  | { type: 'tool_use'; id: string; name: string; input: unknown }
+  | { type: 'tool_result'; tool_use_id: string; content: unknown; is_error?: boolean }
+
+export interface ApiMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool'
+  content: string | MsgBlock[]
+  /** Nota corta junto al rol (p. ej. "llamada 2"). */
+  note?: string
+}
+
+/**
+ * Dato concreto que viaja en el paso: un payload (JSON, HTTP, YAML…) o el arreglo `messages`.
+ * `hl` resalta las líneas que contienen alguno de esos textos (payload) o los índices de mensajes.
+ */
+export type StepData =
+  | { title: string; lang: CodeLang; content: string; hl?: string[] }
+  | { title: string; messages: ApiMessage[]; hl?: number[]; newFrom?: number }
+
+/** Líneas del código que ejecuta el paso. `hl`: textos a buscar o números de línea (1-based). */
+export interface StepCode {
+  /** Clave en `spec.code`. Por defecto, el primer archivo. */
+  file?: string
+  hl: (string | number)[]
+}
+
 export interface IsoStep {
   title: string
   body: string
   /** Nodos destacados. Si se omite, se usan los extremos de `flows`. */
   focus?: string[]
-  /** Flujos animados en formato "origen>destino". */
+  /**
+   * Flujos animados en formato "origen>destino". Admite etiqueta opcional:
+   * "agent>model: messages.create" (se muestra en la flecha del diagrama de secuencia).
+   */
   flows?: string[]
+  /** Payload o mensajes que viajan en este paso (pestaña "Datos"). */
+  data?: StepData
+  /** Líneas de código que corresponden a este paso (pestaña "Código"). */
+  code?: StepCode
 }
 
 export interface IsoSpec {
@@ -131,6 +176,15 @@ export interface IsoSpec {
   edges: IsoEdge[]
   zones?: IsoZone[]
   steps: IsoStep[]
-  /** Alto del lienzo en px (por defecto 460). */
+  /** Alto del lienzo en px (por defecto 460). Solo aplica a la vista 3D. */
   height?: number
+  /**
+   * Tipo de diagrama 2D: `flow` (cajas y flechas, por defecto) o `sequence`
+   * (carriles verticales con mensajes en orden; ideal para protocolos).
+   */
+  layout?: 'flow' | 'sequence'
+  /** Solo `sequence`: orden de los carriles (ids de nodos). Por defecto, todos los nodos por `at[0]`. */
+  lanes?: string[]
+  /** Archivos de código que los pasos resaltan (clave → archivo). */
+  code?: Record<string, CodeFile>
 }

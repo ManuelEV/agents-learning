@@ -140,8 +140,14 @@ export function midpoint(path: V3[]): V3 {
 }
 
 export function parseFlow(flow: string): [string, string] {
-  const [from, to] = flow.split('>').map((s) => s.trim())
+  const [from, to] = flow.split(':')[0].split('>').map((s) => s.trim())
   return [from, to]
+}
+
+/** Etiqueta opcional de un flujo "a>b: etiqueta". */
+export function flowLabel(flow: string): string | undefined {
+  const i = flow.indexOf(':')
+  return i >= 0 ? flow.slice(i + 1).trim() || undefined : undefined
 }
 
 /** Nodos destacados de un paso. */

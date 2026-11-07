@@ -19,6 +19,7 @@ function project([x, y, z]) {
   return [(x - z) * s2, (2 * y - x - z) * s6]
 }
 
+const NL = String.fromCharCode(10)
 let errors = 0
 let warnings = 0
 const seen = new Map()
@@ -49,10 +50,57 @@ for (const file of files) {
       if (!ids.has(e.from)) err(`arista desde nodo inexistente ${e.from}`)
       if (!ids.has(e.to)) err(`arista hacia nodo inexistente ${e.to}`)
     }
+    const files = spec.code ?? {}
+    const fileKeys = Object.keys(files)
+    for (const [k, f] of Object.entries(files)) {
+      if (!f.title || !f.lang || typeof f.source !== 'string') err(`code.${k} incompleto (title, lang, source)`)
+      else if (f.source.split(NL).length > 70) warn(`code.${k} tiene ${f.source.split(NL).length} líneas: recorta a lo esencial (≤ 60)`)
+    }
+    if (spec.layout === 'sequence') {
+      for (const l of spec.lanes ?? []) if (!ids.has(l)) err(`lanes: nodo inexistente ${l}`)
+      const rows = spec.steps.reduce((n, st) => n + Math.max(1, st.flows?.length ?? 0), 0)
+      if (rows > 22) warn(`secuencia con ${rows} filas: considera dividir`)
+    }
+    let withCode = 0
+    let withData = 0
     spec.steps.forEach((st, i) => {
       for (const f of st.flows ?? []) {
-        const [a, b] = f.split('>').map((s) => s.trim())
+        const [a, b] = f.split(':')[0].split('>').map((s) => s.trim())
         if (!ids.has(a) || !ids.has(b)) err(`paso ${i + 1}: flujo inválido "${f}"`)
+      }
+      if (st.code) {
+        withCode++
+        const key = st.code.file ?? fileKeys[0]
+        const file = files[key]
+        if (!file) err(`paso ${i + 1}: code.file "${key}" no existe en spec.code`)
+        else {
+          const lines = file.source.split(NL)
+          for (const h of st.code.hl ?? []) {
+            if (typeof h === 'number') {
+              if (h < 1 || h > lines.length) err(`paso ${i + 1}: línea ${h} fuera de rango en ${key}`)
+            } else if (!lines.some((l) => l.includes(h))) err(`paso ${i + 1}: code.hl "${h}" no aparece en ${key}`)
+          }
+          if (!st.code.hl?.length) warn(`paso ${i + 1}: code sin hl`)
+        }
+      }
+      if (st.data) {
+        withData++
+        if ('messages' in st.data) {
+          if (!Array.isArray(st.data.messages) || !st.data.messages.length) err(`paso ${i + 1}: data.messages vacío`)
+        } else {
+          if (typeof st.data.content !== 'string' || !st.data.lang) err(`paso ${i + 1}: data sin content/lang`)
+          else {
+            if (st.data.lang === 'json') {
+              try {
+                JSON.parse(st.data.content)
+              } catch {
+                warn(`paso ${i + 1}: data JSON no parsea (¿comentarios o "…"?)`)
+              }
+            }
+            for (const h of st.data.hl ?? []) if (!st.data.content.includes(h)) err(`paso ${i + 1}: data.hl "${h}" no aparece en el payload`)
+            if (st.data.content.split(NL).length > 60) warn(`paso ${i + 1}: payload de ${st.data.content.split(NL).length} líneas (recorta a ≤ 50)`)
+          }
+        }
       }
       for (const fid of st.focus ?? []) if (!ids.has(fid)) err(`paso ${i + 1}: focus inexistente ${fid}`)
       if (!st.flows?.length && !st.focus?.length) warn(`paso ${i + 1} sin flows ni focus`)
@@ -89,9 +137,9 @@ for (const file of files) {
     const spanX = Math.max(...xs) - Math.min(...xs)
     const spanY = Math.max(...ys) - Math.min(...ys)
     const zoom = Math.min(W / (spanX * 1.08 + 0.6), H / (spanY * 1.08 + 0.6))
-    if (zoom < 26) warn(`diagrama muy extenso: zoom ${zoom.toFixed(1)} px/unidad (<26). Etiquetas pueden solaparse; compacta o divide.`)
+    if (zoom < 26) warn(`[3D] diagrama muy extenso: zoom ${zoom.toFixed(1)} px/unidad (<26). Etiquetas pueden solaparse; compacta o divide.`)
     const aspect = spanX / spanY
-    if (aspect < 1.1) warn(`relación de aspecto ${aspect.toFixed(2)} (muy alto): aprovecha el ancho usando más el eje x y z negativo.`)
+    if (aspect < 1.1) warn(`[3D] relación de aspecto ${aspect.toFixed(2)} (muy alto): aprovecha el ancho usando más el eje x y z negativo.`)
 
     const rects = spec.nodes.map((n) => {
       const h = (HEIGHT[n.shape ?? 'box'] ?? 0.75) * (n.scale ?? 1) + (n.elevation ?? 0) + 0.32
@@ -107,9 +155,12 @@ for (const file of files) {
         const b = rects[j]
         const ox = (a.w + b.w) / 2 - Math.abs(a.cx - b.cx)
         const oy = (a.h + b.h) / 2 - Math.abs(a.cy - b.cy)
-        if (ox > 4 && oy > 2) warn(`etiquetas ${a.id} y ${b.id} se solapan (~${Math.round(ox)}×${Math.round(oy)} px)`)
+        if (ox > 4 && oy > 2) warn(`[3D] etiquetas ${a.id} y ${b.id} se solapan (~${Math.round(ox)}×${Math.round(oy)} px)`)
       }
-    console.log(`✓ ${tag} ${spec.nodes.length} nodos, ${spec.edges.length} aristas, ${spec.steps.length} pasos · zoom ${zoom.toFixed(1)} · aspecto ${aspect.toFixed(2)}`)
+    if (fileKeys.length && withCode === 0) warn(`spec.code definido pero ningún paso lo resalta`)
+    console.log(
+      `✓ ${tag} ${spec.layout === 'sequence' ? 'secuencia · ' : ''}${spec.nodes.length} nodos, ${spec.edges.length} aristas, ${spec.steps.length} pasos · datos ${withData}/${spec.steps.length} · código ${withCode}/${spec.steps.length} · zoom3D ${zoom.toFixed(1)}`,
+    )
   }
 }
 console.log(`\n${errors} errores, ${warnings} advertencias`)

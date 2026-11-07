@@ -71,32 +71,120 @@ export const mcpOauth: IsoSpec = {
   ],
 }
 
+const MRTR_SERVER = `from mcp.server import MCPServer, InputRequired, Elicitation
+
+mcp = MCPServer("reembolsos")
+
+@mcp.tool()
+def issue_refund(order_id: str, ctx) -> dict:
+    """Emite un reembolso tras confirmación humana."""
+    amount = erp.refundable_amount(order_id)
+    answer = ctx.input_response("confirmacion")       # None en el primer intento
+    if answer is None:
+        raise InputRequired(                           # → resultType: "input_required"
+            confirmacion=Elicitation(
+                message=f"¿Confirmas reembolso de US\${amount} del pedido {order_id}?",
+                schema={"type": "object", "properties": {"ok": {"type": "boolean"}}},
+            ),
+            state={"order_id": order_id, "amount": amount},   # se sella en requestState
+        )
+    if not answer["ok"]:
+        return {"status": "cancelado"}
+    state = ctx.request_state                          # verificado por el SDK
+    refund = erp.refund(state["order_id"], state["amount"])
+    return {"status": "reembolsado", "refund_id": refund.id}`
+
+const j = (v: unknown) => JSON.stringify(v, null, 2)
+
 export const mcpMrtr: IsoSpec = {
   id: 'mcp-mrtr',
   title: 'Multi Round-Trip Requests: pedir datos al usuario sin sesión',
   summary:
-    'En la spec `2026-07-28` el servidor ya no puede iniciar requests hacia el cliente (adiós a sampling y elicitation "push"). Si una tool necesita algo más, responde `resultType: "input_required"` con `inputRequests`; el cliente obtiene las respuestas y **reintenta** la misma llamada con `inputResponses`.',
+    'En la spec `2026-07-28` el servidor ya no puede iniciar requests hacia el cliente (adiós a sampling y elicitation "push"). Si una tool necesita algo más, responde `resultType: "input_required"` con `inputRequests`; el cliente obtiene las respuestas y **reintenta** la misma llamada con `inputResponses`. El diagrama de secuencia muestra los mensajes en orden; a la derecha, el JSON-RPC y el código del servidor.',
   height: 460,
+  layout: 'sequence',
+  lanes: ['llm', 'client', 'user', 'server', 'erp'],
   nodes: [
     { id: 'llm', label: 'Agente', sub: 'host + LLM', at: [-3.4, 0], shape: 'tall', tone: 'agent', icon: 'bot', info: 'El agente de soporte decidió llamar `issue_refund` para el pedido 4512.' },
-    { id: 'client', label: 'Cliente MCP', at: [0, 0], shape: 'box', tone: 'protocol', icon: 'plug', info: 'Gestiona el ciclo MRTR: detecta `input_required`, resuelve las solicitudes (formulario al usuario) y reintenta. El `Client` del SDK de Python v2 lo hace automáticamente.' },
-    { id: 'user', label: 'Supervisor', sub: 'aprueba el monto', at: [0, -3.6], shape: 'person', tone: 'user', icon: 'hand', info: 'Recibe un formulario de *elicitation* generado por el host: "¿Confirmas reembolso de US$420 al cliente C-889?".' },
+    { id: 'client', label: 'Cliente MCP', sub: 'SDK v2', at: [0, 0], shape: 'box', tone: 'protocol', icon: 'plug', info: 'Gestiona el ciclo MRTR: detecta `input_required`, resuelve las solicitudes (formulario al usuario) y reintenta. El `Client` del SDK de Python v2 lo hace automáticamente.' },
+    { id: 'user', label: 'Supervisor', sub: 'aprueba el monto', at: [0, -3.6], shape: 'person', tone: 'user', icon: 'hand', info: 'Recibe un formulario de *elicitation* generado por el host: "¿Confirmas reembolso de US$420 del pedido 4512?".' },
     { id: 'server', label: 'Servidor MCP', sub: 'reembolsos', at: [3.6, 0], shape: 'tall', tone: 'tool', icon: 'server', info: 'No guarda estado entre intentos: lo que necesita recordar lo devuelve sellado en `requestState`, que el cliente reenvía tal cual.' },
-    { id: 'state', label: 'requestState', sub: 'sellado por el servidor', at: [3.6, -3.6], shape: 'doc', tone: 'memory', icon: 'lock', info: 'Estado opaco firmado/cifrado por el servidor. Con varias réplicas, todas deben compartir las claves para verificarlo.' },
     { id: 'erp', label: 'ERP', sub: 'pagos', at: [7.2, 0], shape: 'cylinder', tone: 'data', icon: 'database', info: 'El reembolso se ejecuta solo después de la confirmación explícita.' },
   ],
   edges: [
     { from: 'llm', to: 'client' },
     { from: 'client', to: 'server' },
     { from: 'client', to: 'user', route: 'z' },
-    { from: 'server', to: 'state', route: 'z', dashed: true },
     { from: 'server', to: 'erp' },
   ],
+  code: { server: { title: 'server.py (ilustrativo)', lang: 'python', source: MRTR_SERVER } },
   steps: [
-    { title: '1 · Primera llamada', body: 'El agente invoca `tools/call issue_refund {"order_id": "4512"}`.', flows: ['llm>client', 'client>server'] },
-    { title: '2 · input_required', body: 'El servidor responde `resultType: "input_required"` con un `inputRequests` de tipo elicitation (monto y confirmación) y un `requestState` sellado.', flows: ['server>state', 'server>client'] },
-    { title: '3 · Preguntar a una persona', body: 'El host muestra el formulario al supervisor. La respuesta no pasa por el LLM: va directo del usuario al cliente.', flows: ['client>user', 'user>client'] },
-    { title: '4 · Reintento con respuestas', body: 'El cliente repite **la misma** `tools/call` agregando `inputResponses` y el `requestState`. Cualquier réplica del servidor puede atenderla.', flows: ['client>server'] },
-    { title: '5 · Ejecutar y responder', body: 'El servidor verifica el estado, ejecuta el reembolso en el ERP y devuelve un resultado normal al agente.', flows: ['server>erp', 'erp>server', 'server>client', 'client>llm'] },
+    {
+      title: '1 · Primera llamada',
+      body: 'El agente decide reembolsar y el cliente envía `tools/call` **sin** respuestas: todavía no sabe que la tool necesita una confirmación.',
+      flows: ['llm>client: issue_refund(4512)', 'client>server: tools/call'],
+      data: {
+        title: 'POST /mcp · Mcp-Method: tools/call',
+        lang: 'json',
+        content: j({ jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'issue_refund', arguments: { order_id: '4512' }, _meta: { protocolVersion: '2026-07-28' } } }),
+        hl: ['"method"', '"arguments"'],
+      },
+      code: { hl: ['def issue_refund', 'erp.refundable_amount', 'ctx.input_response'] },
+    },
+    {
+      title: '2 · input_required',
+      body: 'El servidor no puede llamar al cliente, así que **responde** pidiendo lo que falta: un `inputRequests` de tipo elicitation y un `requestState` sellado con el monto calculado.',
+      flows: ['server>client: input_required'],
+      data: {
+        title: 'respuesta JSON-RPC (forma simplificada)',
+        lang: 'json',
+        content: j({
+          jsonrpc: '2.0',
+          id: 7,
+          result: {
+            resultType: 'input_required',
+            inputRequests: { confirmacion: { type: 'elicitation', message: '¿Confirmas reembolso de US$420 del pedido 4512?', requestedSchema: { type: 'object', properties: { ok: { type: 'boolean' } } } } },
+            requestState: 'eyJhbGciOi…sellado',
+          },
+        }),
+        hl: ['"resultType"', '"inputRequests"', '"requestState"'],
+      },
+      code: { hl: ['if answer is None', 'raise InputRequired', 'Elicitation(', 'state={"order_id"'] },
+    },
+    {
+      title: '3 · Preguntar a una persona',
+      body: 'El host muestra el formulario al supervisor. La respuesta **no pasa por el LLM**: va directo del usuario al cliente, así el modelo no puede "aprobarse a sí mismo".',
+      flows: ['client>user: formulario', 'user>client: { ok: true }'],
+      data: { title: 'respuesta del formulario', lang: 'json', content: j({ confirmacion: { ok: true } }), hl: ['"ok"'] },
+    },
+    {
+      title: '4 · Reintento con respuestas',
+      body: 'El cliente repite **la misma** `tools/call` agregando `inputResponses` y el `requestState` tal cual lo recibió. Cualquier réplica del servidor puede atenderla: no hay sesión.',
+      flows: ['client>server: tools/call + inputResponses'],
+      data: {
+        title: 'POST /mcp · reintento',
+        lang: 'json',
+        content: j({
+          jsonrpc: '2.0',
+          id: 8,
+          method: 'tools/call',
+          params: { name: 'issue_refund', arguments: { order_id: '4512' }, inputResponses: { confirmacion: { ok: true } }, requestState: 'eyJhbGciOi…sellado' },
+        }),
+        hl: ['"inputResponses"', '"requestState"'],
+      },
+      code: { hl: ['ctx.input_response', 'state = ctx.request_state'] },
+    },
+    {
+      title: '5 · Ejecutar y responder',
+      body: 'El servidor verifica el sello, ejecuta el reembolso en el ERP con **su** credencial y devuelve un resultado normal, que el host entrega al modelo como `tool_result`.',
+      flows: ['server>erp: refund()', 'erp>server', 'server>client: result', 'client>llm: tool_result'],
+      data: {
+        title: 'respuesta JSON-RPC',
+        lang: 'json',
+        content: j({ jsonrpc: '2.0', id: 8, result: { content: [{ type: 'text', text: '{"status":"reembolsado","refund_id":"RF-20931"}' }], structuredContent: { status: 'reembolsado', refund_id: 'RF-20931' }, isError: false } }),
+        hl: ['"structuredContent"'],
+      },
+      code: { hl: ['erp.refund(', 'return {"status": "reembolsado"'] },
+    },
   ],
 }
