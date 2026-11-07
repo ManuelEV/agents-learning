@@ -124,7 +124,7 @@ export function CodeView({
   title,
   highlight,
   dim = true,
-  maxHeight = 360,
+  maxHeight,
   right,
 }: {
   code: string
@@ -174,7 +174,7 @@ export function CodeView({
           {copied ? <Check size={13} /> : <Copy size={13} />}
         </button>
       </div>
-      <pre ref={preRef} style={{ maxHeight }}>
+      <pre ref={preRef} style={maxHeight ? { maxHeight } : undefined}>
         {lines.map((segs, i) => {
           const n = i + 1
           const on = hl.has(n)
