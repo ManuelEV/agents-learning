@@ -123,9 +123,9 @@ export const cdaPinterest: IsoSpec = {
 
 export const cdaPatron: IsoSpec = {
   id: 'cda-patron',
-  title: 'El patrón común, aplicado a ADK + gateway + Bedrock',
+  title: 'El patrón común (ejemplo con ADK + gateway + Bedrock)',
   summary:
-    'Síntesis propia (no es la arquitectura de ninguna empresa) de lo que comparten los casos: **contexto semántico curado**, un **validador determinista** entre el agente y el warehouse, ejecución con la **identidad del usuario**, SQL visible en la respuesta y **evaluación con set dorado**. Mapeado al stack ADK + AI gateway + Bedrock.',
+    'Síntesis propia (no es la arquitectura de ninguna empresa) de lo que comparten los casos: **contexto semántico curado**, un **validador determinista** entre el agente y el warehouse, ejecución con la **identidad del usuario**, SQL visible en la respuesta y **evaluación con set dorado**. Mapeado, como ejemplo, a ADK + AI gateway + Bedrock; cada pieza tiene equivalentes en otras nubes.',
   height: 500,
   nodes: [
     { id: 'user', label: 'Analista', sub: 'identidad OIDC', at: [0, 0], shape: 'person', tone: 'user', icon: 'user', info: 'La identidad (y sus grupos) viaja en la sesión. El agente nunca recibe credenciales "de servicio" con más permisos que el usuario.' },

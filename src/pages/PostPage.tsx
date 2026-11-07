@@ -111,7 +111,7 @@ export function PostPage() {
 
   useEffect(() => {
     if (meta) {
-      document.title = `${meta.title} · Agentes en la empresa`
+      document.title = `${meta.title} · Agentes de IA a nivel empresarial`
       document.querySelector('meta[name="description"]')?.setAttribute('content', meta.description)
     }
     setHeadings([])

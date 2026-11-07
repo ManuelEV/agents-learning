@@ -1,9 +1,22 @@
-Esta es la arquitectura que más se repite en empresas que estandarizaron **Google ADK** como framework y **AWS** como nube: el agente se escribe en ADK, corre en **Bedrock AgentCore Runtime**, habla con **Claude en Bedrock** siempre a través de un **AI gateway corporativo** (LiteLLM Proxy) y accede a sistemas internos mediante **MCP** gobernado por **AgentCore Gateway**. Sobre esa columna vertebral se montan RAG, memoria, guardrails, observabilidad y evaluaciones.
+Esta página baja a tierra el resto de la guía en una arquitectura completa. El patrón no depende del proveedor: un **framework de agentes**, un **runtime gestionado**, un **AI gateway** como único camino a los modelos y un **gateway de herramientas** con MCP. Para mostrar código real lo implementamos con una combinación concreta y frecuente en empresas que usan AWS: el agente se escribe en **Google ADK**, corre en **Bedrock AgentCore Runtime**, habla con **Claude en Bedrock** siempre a través de un **AI gateway corporativo** (LiteLLM Proxy) y accede a sistemas internos mediante **MCP** gobernado por **AgentCore Gateway**. Sobre esa columna vertebral se montan RAG, memoria, guardrails, observabilidad y evaluaciones.
 
 El ejemplo concreto es un **asistente de operaciones para una cadena de retail**: responde a jefes de tienda y analistas sobre pedidos, stock y procedimientos, y puede emitir acciones acotadas (crear un ticket, proponer una nota de crédito). Todo lo que sigue está anclado a **octubre de 2026**.
 
 <Callout type="info" title="Por qué esta combinación">
 ADK no trae integración nativa con Bedrock: la vía documentada es el conector **LiteLLM** (`google.adk.models.lite_llm.LiteLlm`). Eso convierte a LiteLLM en la pieza natural para el gateway: el mismo formato `bedrock/<perfil>` sirve embebido en el agente o centralizado en un proxy. AgentCore, por su parte, es agnóstico de framework y tiene un sample oficial de ADK.
+</Callout>
+
+<Callout type="tip" title="Si tu stack es otro">
+Las decisiones de diseño de esta página (credenciales solo en los gateways, políticas fuera del prompt, evals como gate de despliegue) valen igual con otras piezas:
+
+| Pieza | En este ejemplo | Alternativas habituales |
+|---|---|---|
+| Framework | Google ADK | [Strands](/guia/strands-agents), [LangGraph](/guia/langgraph), [OpenAI Agents SDK, Microsoft Agent Framework](/guia/otros-frameworks) |
+| Runtime | AgentCore Runtime | Agent Runtime de [Google Agent Platform](/guia/google-agent-platform), [Foundry Agent Service](/guia/microsoft-foundry-cloudflare), contenedores propios |
+| AI gateway | LiteLLM Proxy | Portkey, Kong, Cloudflare AI Gateway (ver [Gateways](/guia/gateways)) |
+| Modelo | Claude en Bedrock | Gemini, Claude o GPT en otra nube, modelos abiertos |
+| Gateway de herramientas | AgentCore Gateway | Agent Gateway de Google, servidores MCP propios |
+| RAG | Bedrock Knowledge Bases | RAG Engine, Vertex AI Search, Azure AI Search, tu vector store |
 </Callout>
 
 ## Vista general: qué hace cada pieza
@@ -91,7 +104,7 @@ antes de adoptarlo: es una capacidad reciente.
 | Latencia añadida | Ninguna | Un salto de red interno (ms) | Un salto gestionado |
 | Cuándo elegirla | Prototipos, un solo equipo | **Varios equipos/agentes, chargeback, multiproveedor** | Organización 100 % Bedrock sin necesidad de proxy propio |
 
-La recomendación para el lector típico de esta guía es **B**: varios equipos construyen agentes, finanzas quiere costo por equipo, seguridad quiere un único punto de control y es probable que algún agente use Gemini o un modelo abierto. Si mañana todo queda en Bedrock y el equipo de plataforma prefiere no operar contenedores, migrar a **C** es cambiar `api_base` y el nombre del modelo, no reescribir el agente.
+En una empresa mediana o grande la opción por defecto es **B**: varios equipos construyen agentes, finanzas quiere costo por equipo, seguridad quiere un único punto de control y es probable que algún agente use Gemini o un modelo abierto. Si mañana todo queda en Bedrock y el equipo de plataforma prefiere no operar contenedores, migrar a **C** es cambiar `api_base` y el nombre del modelo, no reescribir el agente.
 
 ## Estructura del proyecto
 

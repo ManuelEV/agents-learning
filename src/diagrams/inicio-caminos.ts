@@ -25,7 +25,7 @@ export const caminos: IsoSpec = {
     { title: 'Nivel 3 · Harness de propósito general', body: 'En vez de escribir el loop, configuras un agente ya afinado: el **Claude Agent SDK** (el motor de Claude Code), **Strands Harness** o **AgentCore Harness**. Muy productivo para agentes que operan sobre archivos, código o terminal.', flows: ['fw>harness'] },
     { title: 'Nivel 4 · Plataforma gestionada', body: '**Bedrock AgentCore**, **Gemini Enterprise Agent Platform** o **Microsoft Foundry** resuelven la operación: aislamiento por sesión, identidad, memoria, gateway de herramientas, políticas y evaluación. Normalmente ejecutan tu framework del nivel 2.', flows: ['harness>platform'] },
     { title: 'Nivel 5 · Agentes SaaS', body: 'Productos como **Gemini Enterprise** o Microsoft Copilot permiten que equipos de negocio armen agentes con conectores. Rápido, pero con poco control sobre el razonamiento, la evaluación y la integración.', flows: ['platform>saas'] },
-    { title: 'La combinación típica en empresa', body: 'Framework OSS (nivel 2) **desplegado** en una plataforma gestionada (nivel 4), con modelos detrás de un **AI gateway** y herramientas expuestas por **MCP**. Es exactamente el patrón ADK + gateway + Bedrock/AgentCore.', focus: ['fw', 'platform'] },
+    { title: 'La combinación típica en empresa', body: 'Framework OSS (nivel 2) **desplegado** en una plataforma gestionada (nivel 4), con modelos detrás de un **AI gateway** y herramientas expuestas por **MCP**. Es el patrón de la arquitectura de referencia de esta guía.', focus: ['fw', 'platform'] },
   ],
 }
 

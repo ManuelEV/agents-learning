@@ -87,6 +87,6 @@ No ejecutes `vite build` ni `vite dev` (los corre el integrador). No edites arch
 | conectar | `rag`, `mcp`, `a2a`, `gateways` |
 | frameworks | `google-adk`, `strands-agents`, `langgraph`, `otros-frameworks`, `comparativa-frameworks` |
 | plataformas | `aws-bedrock-agentcore`, `google-agent-platform`, `microsoft-foundry-cloudflare` |
-| arquitecturas | `arquitectura-adk-gateway-bedrock`, `arquitectura-soporte-rag-mcp`, `arquitectura-multiagente-a2a` |
+| arquitecturas | `arquitectura-de-referencia`, `arquitectura-soporte-rag-mcp`, `arquitectura-multiagente-a2a` |
 | casos | `casos-reales`, `caso-atencion-cliente`, `caso-migraciones-codigo`, `caso-investigacion-multiagente`, `caso-datos-analitica`, `caso-servicios-financieros`, `caso-plataformas-internas` |
 | produccion | `evaluacion-observabilidad`, `seguridad-gobernanza`, `orquestacion-avanzada` |

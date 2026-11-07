@@ -209,9 +209,9 @@ OpenAI lanzó **deep research** el 02-02-2025 con otro enfoque. Según su anunci
 
 La lección para ti es que el multiagente es una forma de **conseguir con orquestación lo que un modelo no hace solo**. Si tienes un modelo entrenado para la tarea, un agente único puede bastar. La mayoría de las empresas no entrena modelos, así que su palanca real es la arquitectura: separar contextos, paralelizar y comprimir. Hay un camino intermedio: integrar el deep research de un proveedor. Harvey, por ejemplo, afirma que integró la API de deep research de OpenAI en su plataforma legal menos de 12 horas después de su lanzamiento (Harvey, 03-07-2025). Thomson Reuters eligió lo contrario porque su diferencial son las herramientas y el contenido propietarios.
 
-## Llevarlo a tu stack: ADK + gateway + Bedrock
+## Cómo aplicarlo: un ejemplo con ADK
 
-El patrón de Anthropic se puede aproximar en Google ADK con un `ParallelAgent` de investigadores y un sintetizador, enrutando los modelos por tu AI gateway. Ejemplo: una cadena de retail que evalúa entrar a un nuevo país.
+El patrón de Anthropic se puede aproximar en Google ADK con un `ParallelAgent` de investigadores y un sintetizador, enrutando los modelos por un AI gateway. Con Strands o LangGraph el patrón es el mismo. Ejemplo: una cadena de retail que evalúa entrar a un nuevo país.
 
 ```python title="investigacion/agent.py"
 import os

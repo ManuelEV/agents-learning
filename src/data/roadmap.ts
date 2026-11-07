@@ -136,7 +136,7 @@ export const ROADMAP: RoadmapLevel[] = [
     ],
     project: {
       title: 'Servidor MCP corporativo',
-      detail: 'Un servidor MCP (Streamable HTTP + OAuth) que expone un sistema interno: solo lectura primero, luego escritura con step-up de scopes. Consumido por tu agente ADK a través de un LiteLLM Proxy con claves virtuales y presupuesto.',
+      detail: 'Un servidor MCP (Streamable HTTP + OAuth) que expone un sistema interno: solo lectura primero, luego escritura con step-up de scopes. Consumido por tu agente a través de un AI gateway (p. ej. LiteLLM Proxy) con claves virtuales y presupuesto.',
     },
     done: ['Tu servidor MCP valida audiencia y scopes', 'El agente no ve credenciales del proveedor LLM', 'Tienes presupuesto y logs por equipo'],
     guide: [

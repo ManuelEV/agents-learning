@@ -64,7 +64,7 @@ Al poner los casos lado a lado aparece una arquitectura común. No es la de ning
 
 <Diagram id="casos-anatomia" height={600} />
 
-Si comparas este diagrama con la [arquitectura ADK + AI gateway + Bedrock](/guia/arquitectura-adk-gateway-bedrock), vas a notar que las piezas coinciden: el AI gateway, el gateway de herramientas (AgentCore Gateway o un servidor MCP propio), la verificación y las trazas. Lo que los casos agregan es **dónde ponen el esfuerzo** y **qué falla primero**.
+Si comparas este diagrama con la [arquitectura de referencia](/guia/arquitectura-de-referencia), vas a notar que las piezas coinciden: el AI gateway, el gateway de herramientas (AgentCore Gateway o un servidor MCP propio), la verificación y las trazas. Lo que los casos agregan es **dónde ponen el esfuerzo** y **qué falla primero**.
 
 ## Diez lecciones transversales
 
@@ -116,18 +116,18 @@ LinkedIn multiplicó entre 5 y 10 veces el uso de SQL Bot al integrarlo en la pl
 
 Block construyó goose sobre MCP y lo donó a la Agentic AI Foundation; Uber registra sus herramientas en un MCP Gateway; LinkedIn declaró que migra su registro propietario de agentes y skills hacia MCP y A2A; Deutsche Telekom publicó su plataforma como Eclipse LMOS. La razón es práctica: cuando cientos de equipos publican herramientas y agentes, un protocolo común reduce el costo de integración de N×M a N+M. Más contexto en [MCP](/guia/mcp) y [A2A](/guia/a2a).
 
-## Lo que esto significa para un stack ADK + gateway + Bedrock
+## Cómo llevar las lecciones a tu arquitectura
 
 Un hallazgo honesto de esta investigación: **a octubre de 2026 no encontramos casos públicos con nombre que describan un despliegue a gran escala sobre Bedrock AgentCore o Google ADK con arquitectura y cifras**. Lo que sí hay son casos que validan las piezas por separado:
 
 - **Bedrock como capa de modelos en producción**: DoorDash en su autoservicio por voz (Claude en Bedrock con Knowledge Bases), Lyft con Claude en Bedrock para soporte, Intercom con Anthropic en Bedrock, Moody's y Robinhood sobre Bedrock, y el framework de Allianz Technology con Bedrock, LangGraph y MCP.
-- **Gateways propios hacia los modelos**: Uber, Cloudflare, Robinhood y JPMorgan, que es el rol de tu AI gateway.
+- **Gateways propios hacia los modelos**: Uber, Cloudflare, Robinhood y JPMorgan, el rol de un AI gateway corporativo.
 - **MCP como capa de herramientas**: Uber, Block, Cloudflare y LinkedIn.
 - **Arquitecturas publicadas por AWS**: por ejemplo, agentes de investigación con Deep Agents sobre AgentCore, presentadas como tutorial y no como caso de cliente.
 
-<Callout type="info" title="Cómo traducir las lecciones a tu stack">
+<Callout type="info" title="Dónde vive cada lección (ejemplo con ADK + AI gateway + Bedrock)">
 
-| Lección | Dónde vive en ADK + gateway + Bedrock |
+| Lección | Dónde vive en el ejemplo |
 |---|---|
 | Oráculo y verificación | `after_model_callback` / `after_tool_callback` de ADK, tools de validación, Bedrock Guardrails, juez en CI |
 | Contexto curado | Bedrock Knowledge Bases o tu vector store con reranking, catálogo de datos expuesto por MCP |
@@ -139,7 +139,7 @@ Un hallazgo honesto de esta investigación: **a octubre de 2026 no encontramos c
 
 </Callout>
 
-Las páginas de [AgentCore](/guia/aws-bedrock-agentcore), [seguridad y gobernanza](/guia/seguridad-gobernanza) y la [arquitectura de referencia](/guia/arquitectura-adk-gateway-bedrock) tienen el detalle de cada pieza.
+Las páginas de [AgentCore](/guia/aws-bedrock-agentcore), [seguridad y gobernanza](/guia/seguridad-gobernanza) y la [arquitectura de referencia](/guia/arquitectura-de-referencia) tienen el detalle de cada pieza.
 
 ## Cómo seguir investigando
 
@@ -168,5 +168,5 @@ Si quieres buscar más casos, estas fuentes rinden:
 <Cards cols={3}>
   <Card title="Empieza por soporte" href="/guia/caso-atencion-cliente">El dominio más cercano a un retail: pipelines de recuperación, guardrails y la lección de Klarna.</Card>
   <Card title="La plataforma interna" href="/guia/caso-plataformas-internas">Si vas a habilitar a varios equipos, el blueprint destilado de Uber, Block, Cloudflare y Deutsche Telekom.</Card>
-  <Card title="Tu arquitectura de referencia" href="/guia/arquitectura-adk-gateway-bedrock">Vuelve a ADK + AI gateway + Bedrock con las lecciones de los casos en mente.</Card>
+  <Card title="Arquitectura de referencia" href="/guia/arquitectura-de-referencia">Una arquitectura completa de extremo a extremo, para leer con las lecciones de los casos en mente.</Card>
 </Cards>

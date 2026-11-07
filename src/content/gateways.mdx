@@ -211,7 +211,7 @@ La consecuencia práctica: puedes empezar con **un solo producto para ambos tipo
 
 - **LLM gateway** = acceso a modelos (claves virtuales, presupuestos, límites, fallbacks, costos). **Tool gateway** = acceso a herramientas (OAuth, políticas, auditoría).
 - En 2026 convergen: LiteLLM, Kong, Portkey y Agent Router hacen MCP; AgentCore Gateway acepta inference targets.
-- Patrón de referencia del lector: **ADK → `LiteLlm("litellm_proxy/…")` → LiteLLM Proxy → Bedrock `global.`**, con fallback a otra cuenta/región o a un modelo menor.
+- Ejemplo de la arquitectura de referencia: **ADK → `LiteLlm("litellm_proxy/…")` → LiteLLM Proxy → Bedrock `global.`**, con fallback a otra cuenta/región o a un modelo menor.
 - **LiteLLM 1.82.7/1.82.8 comprometidas**: usa `>=1.84` y rota credenciales si estuvieron instaladas.
 - Los fallbacks entre geografías o proveedores son decisiones de **cumplimiento**, no solo técnicas.
 
@@ -220,7 +220,7 @@ La consecuencia práctica: puedes empezar con **un solo producto para ambos tipo
 ## Siguientes pasos
 
 <Cards cols={3}>
-  <Card title="Arquitectura ADK + gateway + Bedrock" href="/guia/arquitectura-adk-gateway-bedrock">El patrón completo desplegado de punta a punta.</Card>
+  <Card title="Arquitectura de referencia" href="/guia/arquitectura-de-referencia">El patrón completo desplegado de punta a punta.</Card>
   <Card title="AWS Bedrock y AgentCore" href="/guia/aws-bedrock-agentcore">Perfiles de inferencia, Gateway, Identity y Policy en detalle.</Card>
   <Card title="Seguridad y gobernanza" href="/guia/seguridad-gobernanza">Identidad de agentes, mínimo privilegio y auditoría.</Card>
 </Cards>

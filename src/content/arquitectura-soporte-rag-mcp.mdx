@@ -1,6 +1,6 @@
 Un asistente de soporte es el caso de uso agéntico más común en retail y también uno de los más expuestos: habla con clientes externos, maneja datos personales, cita políticas que tienen consecuencias legales y puede mover dinero. Esta arquitectura de referencia resuelve un escenario concreto —**una cadena de retail con venta online y tiendas físicas en varios países**— y muestra qué piezas hacen falta para pasar de un chatbot con RAG a un agente que **resuelve casos** de forma segura.
 
-El asistente debe: responder dudas con la **política vigente y citada**, consultar **pedidos, envíos e historial** del cliente, **gestionar reembolsos** con controles, y **escalar a una persona** cuando corresponde. Es agnóstica de framework; el código usa Google ADK y Strands, y la infraestructura puede ser la de [la arquitectura ADK + gateway + Bedrock](/guia/arquitectura-adk-gateway-bedrock). Estados y versiones a **octubre de 2026**.
+El asistente debe: responder dudas con la **política vigente y citada**, consultar **pedidos, envíos e historial** del cliente, **gestionar reembolsos** con controles, y **escalar a una persona** cuando corresponde. Es agnóstica de framework; el código usa Google ADK y Strands, y la infraestructura puede ser la de la [arquitectura de referencia](/guia/arquitectura-de-referencia). Estados y versiones a **octubre de 2026**.
 
 ## Los componentes
 
@@ -286,7 +286,7 @@ Empieza con **20–50 casos tomados de conversaciones reales** (especialmente la
 ## Siguientes pasos
 
 <Cards cols={3}>
-  <Card title="ADK + gateway + Bedrock" href="/guia/arquitectura-adk-gateway-bedrock">La infraestructura de base: Runtime, AI gateway, Gateway MCP, Memory y CI/CD.</Card>
+  <Card title="Arquitectura de referencia" href="/guia/arquitectura-de-referencia">La infraestructura de base: Runtime, AI gateway, Gateway MCP, Memory y CI/CD.</Card>
   <Card title="Multiagente con A2A" href="/guia/arquitectura-multiagente-a2a">Cuándo sí conviene dividir en varios agentes y cómo conectarlos.</Card>
   <Card title="RAG" href="/guia/rag">Chunking, embeddings, búsqueda híbrida, GraphRAG y evaluación de retrieval.</Card>
   <Card title="MCP" href="/guia/mcp">El protocolo por dentro: transporte, autorización OAuth 2.1 y la revisión 2026-07-28.</Card>

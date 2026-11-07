@@ -32,7 +32,7 @@ Antes de comparar, una advertencia que ahorra meses: **el framework es la decisi
 
 <Cards cols={2}>
   <Card title="Empresa AWS (Bedrock + AgentCore)" tag="AWS">
-    **Strands** es el camino nativo y con menos código. Si el equipo ya domina ADK (como el lector de referencia), **ADK + LiteLLM → Bedrock** desplegado en **AgentCore Runtime** es igual de válido. LangGraph si el proceso exige grafos con checkpoints.
+    **Strands** es el camino nativo y con menos código. Si el equipo ya domina ADK, **ADK + LiteLLM → Bedrock** desplegado en **AgentCore Runtime** es igual de válido. LangGraph si el proceso exige grafos con checkpoints.
   </Card>
   <Card title="Empresa Google Cloud" tag="GCP">
     **Google ADK** con Agent Runtime, Sessions y Memory Bank, Agent Gateway y Agent Registry. Para flujos estrictos, los grafos `Workflow` de ADK 2.0 evitan sumar LangGraph.
@@ -71,8 +71,8 @@ En 2026 los grandes runtimes gestionados son **agnósticos de framework**: Agent
 
 Esto cambia la conversación: no necesitas Strands para usar AgentCore ni ADK para usar Google Cloud. Decide el **framework** por equipo y tipo de flujo, y el **runtime** por dónde están tus datos, tu identidad corporativa y tus modelos. Los detalles de cada plataforma están en [AWS Bedrock y AgentCore](/guia/aws-bedrock-agentcore), [Google Agent Platform](/guia/google-agent-platform) y [Microsoft Foundry y Cloudflare](/guia/microsoft-foundry-cloudflare).
 
-<Callout type="info" title="Un ejemplo real: el lector de referencia">
-Un equipo que eligió **Google ADK** por su modelo de agentes y evaluación integrada, pero cuya empresa estandarizó en **AWS**, no tiene que elegir: usa Claude en Bedrock vía LiteLLM (idealmente a través de un proxy LiteLLM como AI gateway) y despliega en **AgentCore Runtime** con el sample oficial. La [arquitectura ADK + gateway + Bedrock](/guia/arquitectura-adk-gateway-bedrock) muestra el diseño completo.
+<Callout type="info" title="Ejemplo: un equipo ADK en una empresa AWS">
+Un equipo que eligió **Google ADK** por su modelo de agentes y evaluación integrada, pero cuya empresa estandarizó en **AWS**, no tiene que elegir: usa Claude en Bedrock vía LiteLLM (idealmente a través de un proxy LiteLLM como AI gateway) y despliega en **AgentCore Runtime** con el sample oficial. La [arquitectura ADK + gateway + Bedrock](/guia/arquitectura-de-referencia) muestra el diseño completo.
 </Callout>
 
 ## Cómo evaluar un framework en 2 semanas
@@ -125,7 +125,7 @@ Leer documentación no alcanza: los problemas aparecen al integrar herramientas 
 ## Siguientes pasos
 
 <Cards cols={3}>
-  <Card title="Arquitectura ADK + gateway + Bedrock" href="/guia/arquitectura-adk-gateway-bedrock">La combinación del lector de referencia, de extremo a extremo.</Card>
+  <Card title="Arquitectura de referencia" href="/guia/arquitectura-de-referencia">Framework, AI gateway y runtime gestionado combinados, de extremo a extremo.</Card>
   <Card title="Evaluación y observabilidad" href="/guia/evaluacion-observabilidad">Cómo construir los evals de la PoC y trazar cada paso.</Card>
   <Card title="Multiagente con A2A" href="/guia/arquitectura-multiagente-a2a">Agentes de distintos frameworks colaborando por protocolo.</Card>
 </Cards>

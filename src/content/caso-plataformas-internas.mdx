@@ -1,4 +1,4 @@
-Cuando un solo equipo construye un agente, el problema es el agente. Cuando lo hacen doscientos, el problema pasa a ser la **plataforma**: por dónde pasan las llamadas a modelos, cómo se descubren y autorizan las herramientas, quién es dueño de qué, cómo se mide el costo y cómo se evita que cada equipo reinvente (mal) la autenticación OAuth. Esta página analiza cinco empresas que publicaron con detalle cómo resolvieron esa capa: **Uber**, **Block**, **Cloudflare**, **Deutsche Telekom** y **LinkedIn**. Al final destilamos un blueprint aplicable a un stack ADK + AI gateway + Bedrock.
+Cuando un solo equipo construye un agente, el problema es el agente. Cuando lo hacen doscientos, el problema pasa a ser la **plataforma**: por dónde pasan las llamadas a modelos, cómo se descubren y autorizan las herramientas, quién es dueño de qué, cómo se mide el costo y cómo se evita que cada equipo reinvente (mal) la autenticación OAuth. Esta página analiza cinco empresas que publicaron con detalle cómo resolvieron esa capa: **Uber**, **Block**, **Cloudflare**, **Deutsche Telekom** y **LinkedIn**. Al final destilamos un blueprint aplicable a cualquier empresa, con ejemplos concretos de cada pieza.
 
 <Callout type="warning" title="Cómo leer las cifras">
 Todas las cifras son **auto-reportadas** por las propias empresas (en blogs de ingeniería, charlas o casos de proveedores) y llevan su fecha. Ninguna está auditada por terceros. Cloudflare, además, vende los productos que describe. Los diagramas son **reconstrucciones** a partir del texto publicado, no diagramas oficiales. Datos al 1 de noviembre de 2026.
@@ -111,7 +111,7 @@ Las primeras salidas de los agentes eran plausibles pero incorrectas para cada r
 
 ### Qué puedes aplicar
 
-El patrón **identidad → proxy → AI gateway** es directamente trasladable a tu stack: IdP corporativo delante, [LiteLLM Proxy](/guia/arquitectura-adk-gateway-bedrock) con claves virtuales como único camino a Bedrock, y ningún agente ni laptop con credenciales de proveedor. Y trata el contexto del repositorio (AGENTS.md, catálogo de servicios) como parte de la plataforma, no como responsabilidad de cada desarrollador.
+El patrón **identidad → proxy → AI gateway** es directamente trasladable a cualquier empresa: IdP corporativo delante, un [AI gateway](/guia/gateways) (LiteLLM Proxy, Portkey, Kong…) con claves virtuales como único camino a los modelos, y ningún agente ni laptop con credenciales de proveedor. Y trata el contexto del repositorio (AGENTS.md, catálogo de servicios) como parte de la plataforma, no como responsabilidad de cada desarrollador.
 
 ## Deutsche Telekom: LMOS, agentes como recursos de Kubernetes
 
@@ -183,7 +183,7 @@ Antes de comprar o construir un orquestador, mira qué sistemas tuyos ya garanti
 ## Blueprint: una plataforma interna destilada de los casos
 
 <Callout type="info" title="Esto es una síntesis">
-El diagrama y la lista siguientes son una **síntesis propia** de los patrones que se repiten en los cinco casos, mapeada a un stack ADK + AI gateway + Bedrock. No describen la arquitectura de ninguna de estas empresas.
+El diagrama y la lista siguientes son una **síntesis propia** de los patrones que se repiten en los cinco casos, con ejemplos de la [arquitectura de referencia](/guia/arquitectura-de-referencia) (ADK + AI gateway + Bedrock). No describen la arquitectura de ninguna de estas empresas.
 </Callout>
 
 <Diagram id="cpi-blueprint" height={580} />
@@ -192,11 +192,11 @@ Los componentes, en el orden en que conviene construirlos:
 
 <Steps>
 
-1. **AI gateway como único camino a los modelos.** Uber lo tuvo en 2024 y Cloudflare lo puso "desde el día uno". En tu stack: [LiteLLM Proxy](/guia/arquitectura-adk-gateway-bedrock) (o AgentCore Gateway si todo es Bedrock) con claves virtuales por equipo, presupuestos, PII y atribución de costo. Quita `bedrock:InvokeModel` a todo lo demás.
+1. **AI gateway como único camino a los modelos.** Uber lo tuvo en 2024 y Cloudflare lo puso "desde el día uno". En la práctica: un [AI gateway](/guia/gateways) (LiteLLM Proxy, Portkey, Cloudflare AI Gateway, o AgentCore Gateway si todo es Bedrock) con claves virtuales por equipo, presupuestos, PII y atribución de costo. Quita el permiso de invocar modelos (p. ej. `bedrock:InvokeModel`) a todo lo demás.
 2. **Identidad corporativa delante de todo.** IdP + OAuth; identidad propia por agente y propagación del usuario cuando el agente actúa en su nombre. Ningún secreto en el código ni en laptops (Cloudflare, Block).
 3. **Registro y gateway MCP.** Servidores y tools con dueño, **deshabilitados por defecto**, descripción revisada, autorización por tool y redacción de respuestas (Uber). En AWS: [AgentCore Gateway](/guia/aws-bedrock-agentcore) con Identity y Policy en Cedar. Convierte APIs existentes antes de escribir servidores nuevos.
 4. **Control del contexto.** Con decenas de servidores, los esquemas se comen la ventana: descubrimiento incremental, filtros de tools por agente y Code Mode (Uber, Cloudflare). Diseña servidores desde el workflow (Block).
-5. **Camino pavimentado.** Una plantilla o CLI que deja un agente ADK nuevo con gateway, MCP, identidad y telemetría configurados (`aifx` de Uber, login de OpenCode en Cloudflare).
+5. **Camino pavimentado.** Una plantilla o CLI que deja un agente nuevo con gateway, MCP, identidad y telemetría configurados (`aifx` de Uber, login de OpenCode en Cloudflare).
 6. **Registro de agentes.** Dueño, versión, capacidades y estado. Si tus agentes se invocan entre sí, publica Agent Cards de [A2A](/guia/a2a) y versiona capacidades como LMOS.
 7. **Trazas, costo y evaluaciones como contrato.** OpenTelemetry de punta a punta, costo por equipo y agente, set dorado como gate de promoción y evaluación online (LinkedIn, Telekom).
 8. **Gobierno y adopción.** Revisión de seguridad de servidores, allowlist, detección de "shadow MCP" (Cloudflare), anotación de riesgo por tool (Block) y un programa de enablement con historias de pares (Block, Uber).
@@ -228,7 +228,7 @@ Ninguno de los cinco casos impuso un único framework de agentes a todos sus equ
 ## Siguientes pasos
 
 <Cards cols={3}>
-  <Card title="Arquitectura ADK + gateway + Bedrock" href="/guia/arquitectura-adk-gateway-bedrock">La implementación concreta de los pasos 1 a 3 del blueprint en tu stack.</Card>
+  <Card title="Arquitectura de referencia" href="/guia/arquitectura-de-referencia">Una implementación concreta de los pasos 1 a 3 del blueprint.</Card>
   <Card title="Gateways" href="/guia/gateways">AI gateway vs. gateway MCP, y cómo elegir entre LiteLLM, AgentCore Gateway, Cloudflare y otros.</Card>
   <Card title="MCP" href="/guia/mcp">Servidores, transportes, autorización y diseño de herramientas.</Card>
   <Card title="AWS Bedrock y AgentCore" href="/guia/aws-bedrock-agentcore">Runtime, Gateway, Identity, Policy, Memory y Evaluations para construir la plataforma en AWS.</Card>

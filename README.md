@@ -1,6 +1,6 @@
-# agents-learning
+# Cómo construir agentes de IA a nivel empresarial
 
-Guía práctica (en español) para construir **agentes de IA en entornos empresariales**: frameworks (Google ADK, Strands, LangGraph, …), RAG, MCP, A2A, AI gateways, plataformas cloud (Bedrock AgentCore, Gemini Enterprise Agent Platform, Microsoft Foundry, Cloudflare), arquitecturas de referencia, **casos reales** de empresas que operan agentes a escala y prácticas de producción (evals, observabilidad, seguridad). Incluye una ruta de aprendizaje de 7 niveles y **diagramas isométricos 3D interactivos** que explican cada flujo paso a paso, con referencias a fuentes oficiales.
+Guía práctica (en español), pensada para cualquier equipo, sobre cómo construir **agentes de IA en entornos empresariales**: frameworks (Google ADK, Strands, LangGraph, …), RAG, MCP, A2A, AI gateways, plataformas cloud (Bedrock AgentCore, Gemini Enterprise Agent Platform, Microsoft Foundry, Cloudflare), arquitecturas de referencia, **casos reales** de empresas que operan agentes a escala y prácticas de producción (evals, observabilidad, seguridad). Incluye una ruta de aprendizaje de 7 niveles y **diagramas isométricos 3D interactivos** que explican cada flujo paso a paso, con referencias a fuentes oficiales.
 
 Contenido verificado contra documentación oficial a **octubre de 2026**. La investigación base está en [`docs/research/`](docs/research/).
 

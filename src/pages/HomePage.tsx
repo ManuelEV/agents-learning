@@ -17,7 +17,7 @@ const SECTION_ICON = {
 
 export function HomePage() {
   useEffect(() => {
-    document.title = 'Agentes en la empresa · Guía práctica'
+    document.title = 'Cómo construir agentes de IA a nivel empresarial'
   }, [])
   const refCount = new Set(posts.flatMap((p) => p.references.map((r) => r.url))).size
 
@@ -27,7 +27,7 @@ export function HomePage() {
         <div className="hero-text">
           <div className="hero-kicker">Guía práctica · actualizada a octubre de 2026</div>
           <h1>
-            Construir <span className="grad">agentes de IA</span> en la empresa
+            Cómo construir <span className="grad">agentes de IA</span> a nivel empresarial
           </h1>
           <p>
             Un mapa de las opciones reales para construir agentes —frameworks, RAG, MCP, A2A, gateways y plataformas cloud—, cómo
@@ -38,8 +38,8 @@ export function HomePage() {
             <Link to="/guia/ruta-de-aprendizaje" className="btn btn-primary">
               Empezar la ruta de aprendizaje <ArrowRight size={16} />
             </Link>
-            <Link to="/guia/arquitectura-adk-gateway-bedrock" className="btn">
-              Arquitectura ADK + AI Gateway + Bedrock
+            <Link to="/guia/arquitectura-de-referencia" className="btn">
+              Ver una arquitectura de referencia
             </Link>
           </div>
           <div className="hero-stats">

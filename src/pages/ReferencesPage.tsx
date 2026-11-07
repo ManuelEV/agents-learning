@@ -19,7 +19,7 @@ export function ReferencesPage() {
   const [org, setOrg] = useState<string>('')
 
   useEffect(() => {
-    document.title = 'Referencias · Agentes en la empresa'
+    document.title = 'Referencias · Agentes de IA a nivel empresarial'
   }, [])
 
   const entries = useMemo(() => {

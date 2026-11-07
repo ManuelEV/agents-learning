@@ -201,7 +201,7 @@ export const cpiBlueprint: IsoSpec = {
   id: 'cpi-blueprint',
   title: 'Blueprint de plataforma interna de agentes (síntesis)',
   summary:
-    '**Síntesis propia** de los cinco casos, no la arquitectura de ninguna empresa. Mapeada al stack ADK + AI gateway + Bedrock: un camino pavimentado para crear agentes, un **AI gateway** y un **gateway MCP** como únicos caminos hacia modelos y sistemas, **identidad por agente**, un **registro de agentes**, y trazas + evaluaciones como contrato para pasar a producción.',
+    '**Síntesis propia** de los cinco casos, no la arquitectura de ninguna empresa. Con ejemplos de ADK + AI gateway + Bedrock (cada pieza tiene equivalentes en otras nubes): un camino pavimentado para crear agentes, un **AI gateway** y un **gateway MCP** como únicos caminos hacia modelos y sistemas, **identidad por agente**, un **registro de agentes**, y trazas + evaluaciones como contrato para pasar a producción.',
   height: 560,
   nodes: [
     { id: 'equipos', label: 'Equipos de producto', sub: 'ADK · Strands · LangGraph', at: [0, 0], shape: 'person', tone: 'user', icon: 'users', info: 'Cientos de equipos con frameworks distintos. La plataforma no les impone uno: les impone los caminos hacia modelos, herramientas e identidad.' },

@@ -123,7 +123,7 @@ En un agente, la recuperación es una herramienta con nombre y descripción, com
 
 <Diagram id="rag-agentico" />
 
-Este es el patrón típico para el lector de referencia: una **Knowledge Base de Bedrock** consultada con `Retrieve` (no `RetrieveAndGenerate`: queremos que el agente, no la KB, redacte), expuesta como herramienta de un agente **Google ADK** que llega a Claude a través de un AI gateway.
+Un ejemplo concreto de este patrón: una **Knowledge Base de Bedrock** consultada con `Retrieve` (no `RetrieveAndGenerate`: queremos que el agente, no la KB, redacte), expuesta como herramienta de un agente **Google ADK** que llega a Claude a través de un AI gateway.
 
 ```python title="kb_tool.py"
 import boto3

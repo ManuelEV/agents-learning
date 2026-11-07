@@ -80,7 +80,7 @@ export function RootLayout() {
           <Link to="/" className="brand">
             <Logo />
             <span>
-              Agentes<span className="brand-dim"> en la empresa</span>
+              Agentes<span className="brand-dim"> guía definitiva</span>
             </span>
           </Link>
           <div className="topbar-spacer" />
@@ -137,7 +137,7 @@ export function RootLayout() {
 
       <footer className="footer">
         <div>
-          Guía práctica para construir agentes de IA en entornos empresariales · Contenido verificado contra documentación oficial
+          Cómo construir agentes de IA a nivel empresarial · Guía práctica · Contenido verificado contra documentación oficial
           a octubre de 2026. Revisa siempre las <Link to="/referencias">referencias</Link> antes de decisiones críticas.
         </div>
       </footer>

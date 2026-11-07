@@ -50,7 +50,7 @@ Los resultados son de adopción (98 %) y de acceso a documentos, no de calidad m
 
 ### Qué puedes aplicar
 
-La lección es organizativa: **ningún caso de uso pasa a producción sin su batería de evals**, y esa batería la escriben expertos del negocio. En tu stack, eso significa un set dorado por agente en el repositorio, un gate de CI con AgentCore Evaluations o tu propio runner, y una regresión programada contra producción. Lo desarrollamos en [Evaluación y observabilidad](/guia/evaluacion-observabilidad).
+La lección es organizativa: **ningún caso de uso pasa a producción sin su batería de evals**, y esa batería la escriben expertos del negocio. En la práctica, eso significa un set dorado por agente en el repositorio, un gate de CI con las evaluaciones de tu plataforma (p. ej. AgentCore Evaluations) o tu propio runner, y una regresión programada contra producción. Lo desarrollamos en [Evaluación y observabilidad](/guia/evaluacion-observabilidad).
 
 Robinhood llegó a un patrón muy parecido por otro camino (lo verás más abajo). Este diagrama sintetiza lo que publican ambos:
 
@@ -80,7 +80,7 @@ Las métricas públicas son de alcance y uso, no de calidad ni de impacto financ
 
 ### Qué puedes aplicar
 
-Si tu empresa ya tiene un AI gateway, tienes la pieza central del patrón. Lo que JPMorgan agrega es **producto**: un portal que los empleados prefieren a las alternativas no autorizadas y una cadencia fija de nuevas conexiones a datos internos. En tu arquitectura, LiteLLM Proxy (o el gateway que uses) es el punto único hacia los modelos, y AgentCore Gateway el punto único hacia las herramientas. Ver [Gateways](/guia/gateways) y la [arquitectura de referencia ADK + gateway + Bedrock](/guia/arquitectura-adk-gateway-bedrock).
+Si tu empresa ya tiene un AI gateway, tienes la pieza central del patrón. Lo que JPMorgan agrega es **producto**: un portal que los empleados prefieren a las alternativas no autorizadas y una cadencia fija de nuevas conexiones a datos internos. En una arquitectura así, el AI gateway (LiteLLM Proxy, Portkey o el que uses) es el punto único hacia los modelos, y un gateway de herramientas (p. ej. AgentCore Gateway) el punto único hacia las herramientas. Ver [Gateways](/guia/gateways) y la [arquitectura de referencia](/guia/arquitectura-de-referencia).
 
 ## Moody's: sistema multiagente para análisis crediticio en AWS
 
@@ -158,7 +158,7 @@ Allianz reporta **un 80 % menos de tiempo** de procesamiento y liquidación: de 
 
 ### Qué puedes aplicar
 
-Cambia "siniestro" por **devolución con nota de crédito** y tienes un caso de retail casi idéntico: verificar la compra, la política de devoluciones, señales de fraude, calcular el monto, resumir y pedir aprobación. En tu stack, el resumen del agente de auditoría es lo que muestras en la pantalla de aprobación, y la regla "el pago nunca se automatiza" se implementa como política determinista en el gateway de herramientas (Cedar en AgentCore Policy), no como instrucción en el prompt. Ver [Seguridad y gobernanza](/guia/seguridad-gobernanza).
+Cambia "siniestro" por **devolución con nota de crédito** y tienes un caso de retail casi idéntico: verificar la compra, la política de devoluciones, señales de fraude, calcular el monto, resumir y pedir aprobación. En la implementación, el resumen del agente de auditoría es lo que muestras en la pantalla de aprobación, y la regla "el pago nunca se automatiza" se implementa como política determinista en el gateway de herramientas (p. ej. Cedar en AgentCore Policy), no como instrucción en el prompt. Ver [Seguridad y gobernanza](/guia/seguridad-gobernanza).
 
 ## Robinhood: evals primero, gateway propio y fine-tuning para bajar latencia
 
@@ -237,13 +237,13 @@ Si operas en Chile u otro país de la región, revisa la normativa local de prot
 
 </Steps>
 
-### Dónde vive cada control en ADK + gateway + Bedrock
+### Dónde vive cada control (ejemplo con ADK + gateway + Bedrock)
 
 | Control | Dónde implementarlo | Página |
 |---|---|---|
 | Evals antes de producción y regresión | Set dorado en el repo, gate de CI, AgentCore Evaluations online | [Evaluación y observabilidad](/guia/evaluacion-observabilidad) |
 | Punto único hacia modelos, claves y presupuestos | LiteLLM Proxy u otro AI gateway | [Gateways](/guia/gateways) |
-| Residencia de datos | Alias del gateway con perfiles `eu.`/`us.` sin fallback a `global.` | [Arquitectura ADK + gateway + Bedrock](/guia/arquitectura-adk-gateway-bedrock) |
+| Residencia de datos | Alias del gateway con perfiles `eu.`/`us.` sin fallback a `global.` | [Arquitectura de referencia](/guia/arquitectura-de-referencia) |
 | Permisos por herramienta y montos máximos | AgentCore Gateway + Policy (Cedar), Identity con OBO | [AWS Bedrock y AgentCore](/guia/aws-bedrock-agentcore) |
 | Aprobación humana | Herramienta que crea la solicitud y espera aprobación; política que deniega la ejecución directa | [Seguridad y gobernanza](/guia/seguridad-gobernanza) |
 | Trazabilidad | Spans OpenTelemetry del agente + logs del gateway → CloudWatch | [Evaluación y observabilidad](/guia/evaluacion-observabilidad) |
@@ -271,7 +271,7 @@ Los casos que funcionan en producción en industrias reguladas tienen algo en co
   <Card title="Casos reales: panorama" href="/guia/casos-reales">Qué tienen en común las empresas que ya operan agentes a escala.</Card>
   <Card title="Seguridad y gobernanza" href="/guia/seguridad-gobernanza">Defensa en profundidad, políticas deterministas y aprobación humana.</Card>
   <Card title="Evaluación y observabilidad" href="/guia/evaluacion-observabilidad">Sets dorados, pass^k, LLM-as-judge y trazas OTel.</Card>
-  <Card title="Arquitectura ADK + gateway + Bedrock" href="/guia/arquitectura-adk-gateway-bedrock">Dónde encaja cada control de esta página en tu stack.</Card>
+  <Card title="Arquitectura de referencia" href="/guia/arquitectura-de-referencia">Dónde encaja cada control de esta página en una arquitectura completa.</Card>
   <Card title="Caso: datos y analítica" href="/guia/caso-datos-analitica">Agentes que consultan y analizan datos empresariales.</Card>
   <Card title="Caso: plataformas internas" href="/guia/caso-plataformas-internas">Cómo las empresas construyen la plataforma sobre la que corren sus agentes.</Card>
 </Cards>

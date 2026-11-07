@@ -1,4 +1,4 @@
-**Google Agent Development Kit (ADK)** es un framework open source para construir, evaluar y desplegar agentes, desde un asistente con un par de herramientas hasta sistemas multiagente con flujos deterministas. Está optimizado para Gemini y el ecosistema de Google Cloud, pero es **agnóstico de modelo y de despliegue**: puedes usar Claude en Amazon Bedrock a través de LiteLLM y correr el agente en AWS. Esa combinación (ADK + AI gateway + Bedrock) es justamente la que usa el lector de referencia de esta guía, así que esta página va a fondo.
+**Google Agent Development Kit (ADK)** es un framework open source para construir, evaluar y desplegar agentes, desde un asistente con un par de herramientas hasta sistemas multiagente con flujos deterministas. Está optimizado para Gemini y el ecosistema de Google Cloud, pero es **agnóstico de modelo y de despliegue**: puedes usar Claude en Amazon Bedrock a través de LiteLLM y correr el agente en AWS. Esa combinación (ADK + AI gateway + Bedrock) es frecuente en empresas multinube y es la que usa como ejemplo la arquitectura de referencia de esta guía.
 
 ## Estado del proyecto (octubre de 2026)
 
@@ -305,7 +305,7 @@ Puntos a tener en cuenta:
 - **Perfiles de inferencia**: los Claude recientes en Bedrock se invocan con un *inference profile* (`global.`, `us.`, `eu.`). Usar el ID base `anthropic.claude-sonnet-5-5` devuelve un error 400. Elige `global.` por disponibilidad o un perfil geográfico si tienes requisitos de residencia de datos.
 - **IAM mínimo**: `bedrock:InvokeModel` y `bedrock:InvokeModelWithResponseStream` sobre el ARN del perfil **y** sobre los foundation models en todas las regiones a las que el perfil puede enrutar.
 - **Formatos de LiteLLM**: `bedrock/<model-o-perfil>` o `bedrock/converse/<model>` para forzar la Converse API. Autenticación por la cadena de boto3 o con `AWS_BEARER_TOKEN_BEDROCK`.
-- **Proxy como AI gateway**: la opción B centraliza claves virtuales, presupuestos por equipo, rate limits, fallbacks entre regiones y logs de costo. El patrón completo está en [gateways](/guia/gateways) y en la [arquitectura ADK + gateway + Bedrock](/guia/arquitectura-adk-gateway-bedrock).
+- **Proxy como AI gateway**: la opción B centraliza claves virtuales, presupuestos por equipo, rate limits, fallbacks entre regiones y logs de costo. El patrón completo está en [gateways](/guia/gateways) y en la [arquitectura ADK + gateway + Bedrock](/guia/arquitectura-de-referencia).
 
 <Callout type="danger" title="Seguridad de la cadena de suministro: litellm>=1.84">
 Las versiones **1.82.7 y 1.82.8** de LiteLLM publicadas en PyPI el 24-03-2026 contenían código no autorizado. La documentación de ADK exige `litellm>=1.84` y pide **rotar secretos y credenciales** si instalaste o actualizaste LiteLLM en ese período (esto también afecta a los extras `eval` y `extensions` de ADK). Fija versiones con hashes en tus lockfiles y escanea dependencias en CI.
@@ -435,8 +435,8 @@ if __name__ == "__main__":
 
 El ciclo con la CLI de AgentCore (v1.0, `@aws/agentcore`) es `agentcore create` → `agentcore dev` → `agentcore deploy` → `agentcore invoke`. El código anterior es una simplificación del sample (crea una sesión por invocación); en producción mapea el ID de sesión de AgentCore a tu sesión ADK y usa **AgentCore Memory** o un `DatabaseSessionService` para la persistencia. Detalles en [AWS Bedrock y AgentCore](/guia/aws-bedrock-agentcore).
 
-<Callout type="success" title="La arquitectura del lector de referencia">
-ADK (orquestación) + proxy LiteLLM (AI gateway con claves virtuales y fallbacks) + Claude en Bedrock (modelo) + AgentCore Runtime (ejecución) + AgentCore Gateway (herramientas MCP) es una combinación coherente y soportada por samples oficiales. La desarrollamos de extremo a extremo en [Arquitectura ADK + gateway + Bedrock](/guia/arquitectura-adk-gateway-bedrock).
+<Callout type="success" title="Una combinación de referencia">
+ADK (orquestación) + proxy LiteLLM (AI gateway con claves virtuales y fallbacks) + Claude en Bedrock (modelo) + AgentCore Runtime (ejecución) + AgentCore Gateway (herramientas MCP) es una combinación coherente y soportada por samples oficiales. La desarrollamos de extremo a extremo en la [arquitectura de referencia](/guia/arquitectura-de-referencia).
 </Callout>
 
 ## Errores comunes y buenas prácticas
@@ -471,7 +471,7 @@ ADK (orquestación) + proxy LiteLLM (AI gateway con claves virtuales y fallbacks
 ## Siguientes pasos
 
 <Cards cols={3}>
-  <Card title="Arquitectura de referencia" href="/guia/arquitectura-adk-gateway-bedrock">ADK + AI gateway + Bedrock + AgentCore, de extremo a extremo.</Card>
+  <Card title="Arquitectura de referencia" href="/guia/arquitectura-de-referencia">ADK + AI gateway + Bedrock + AgentCore, de extremo a extremo.</Card>
   <Card title="AI gateways" href="/guia/gateways">LiteLLM Proxy, claves virtuales, presupuestos y fallbacks.</Card>
   <Card title="AWS Bedrock y AgentCore" href="/guia/aws-bedrock-agentcore">Runtime, Memory, Gateway, Identity y Policy.</Card>
   <Card title="Strands Agents" href="/guia/strands-agents">La alternativa nativa de AWS, para comparar enfoques.</Card>
