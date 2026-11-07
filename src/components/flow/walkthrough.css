@@ -1098,3 +1098,24 @@
 .fw-frame:not(.has-side):not(.is-expanded) .fw-stage {
   height: clamp(300px, 52svh, 520px);
 }
+
+.fw-zbtn.is-locked {
+  color: #fff;
+  background: var(--accent);
+}
+:root[data-theme='dark'] .fw-zbtn.is-locked {
+  color: #0b0f1a;
+}
+.fw-zsep {
+  width: 1px;
+  margin: 4px 2px;
+  background: var(--border);
+}
+.fw-zpct {
+  align-self: center;
+  min-width: 38px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-3);
+}

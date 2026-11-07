@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
-import { Crosshair, Minus, Plus, Scan } from 'lucide-react'
+import { Crosshair, Lock, LockOpen, Minus, Plus, Scan } from 'lucide-react'
 
 /* ==========================================================================
    Cámara 2D para los diagramas SVG.
@@ -8,8 +8,10 @@ import { Crosshair, Minus, Plus, Scan } from 'lucide-react'
      completo). Si en un paso las piezas activas quedarían ilegibles (escala
      < READABLE), la cámara se acerca a ellas con una transición suave.
    - El lector puede acercar/alejar (+/−, Ctrl+rueda, pellizco) y arrastrar
-     para moverse. Al cambiar de paso vuelve el modo automático; "Ver todo"
-     restablece el encuadre completo.
+     para moverse. Con "Mantener zoom" (por defecto activo) el nivel de zoom
+     elegido se conserva al avanzar de paso y la cámara solo se desplaza hacia
+     las piezas activas; desactivado, cada paso vuelve al encuadre automático.
+     "Ver todo" restablece el encuadre completo.
    - `fit: 'width'` (secuencias): ajusta al ancho y desplaza en vertical para
      seguir las filas del paso.
    ========================================================================== */
@@ -20,6 +22,22 @@ export type ViewBox = { x: number; y: number; w: number; h: number; s: number }
 type Cam = { cx: number; cy: number; s: number }
 
 const READABLE = 0.62
+const KEEP_KEY = 'fw:keepZoom'
+
+function readKeepZoom(): boolean {
+  try {
+    return localStorage.getItem(KEEP_KEY) !== '0'
+  } catch {
+    return true
+  }
+}
+function writeKeepZoom(v: boolean) {
+  try {
+    localStorage.setItem(KEEP_KEY, v ? '1' : '0')
+  } catch {
+    /* almacenamiento no disponible */
+  }
+}
 const MAX_SCALE = 1.25
 
 export function PanZoom({
@@ -50,6 +68,11 @@ export function PanZoom({
   const [cam, setCam] = useState<Cam | null>(null)
   const [manual, setManual] = useState(false)
   const [follow, setFollow] = useState(true)
+  const [keepZoom, setKeepZoom] = useState(readKeepZoom)
+  /** Zoom elegido por el lector (null = encuadre automático). */
+  const [userScale, setUserScale] = useState<number | null>(null)
+  const userScaleRef = useRef<number | null>(null)
+  userScaleRef.current = userScale
   const camRef = useRef<Cam | null>(null)
   camRef.current = cam
 
@@ -120,9 +143,29 @@ export function PanZoom({
   )
   useEffect(() => () => cancelAnimationFrame(anim.current), [])
 
-  // modo automático: al cambiar de paso, de tamaño o de foco
+  // otro diagrama (pestaña) → vuelve al encuadre automático
   useEffect(() => {
+    setUserScale(null)
+  }, [width, height])
+
+  // al cambiar de paso: conserva el zoom del lector (y sigue el foco) o vuelve al modo automático
+  const firstStep = useRef(true)
+  useEffect(() => {
+    if (firstStep.current) {
+      firstStep.current = false
+      return
+    }
+    const us = userScaleRef.current
+    const c = camRef.current
+    if (keepZoom && us && c) {
+      setManual(true)
+      const target = follow && focus ? { cx: focus.x + focus.w / 2, cy: focus.y + focus.h / 2, s: us } : { ...c, s: us }
+      animateTo(clampCam(target))
+      return
+    }
+    setUserScale(null)
     setManual(false)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stepKey])
   const focusKey = focus ? `${Math.round(focus.x)},${Math.round(focus.y)},${Math.round(focus.w)},${Math.round(focus.h)}` : 'all'
   useEffect(() => {
@@ -147,8 +190,16 @@ export function PanZoom({
       cy = py - (at.y - size.h / 2) / s
     }
     setManual(true)
+    setUserScale(s)
     cancelAnimationFrame(anim.current)
     setCam(clampCam({ cx, cy, s }))
+  }
+
+  const toggleKeep = () => {
+    setKeepZoom((v) => {
+      writeKeepZoom(!v)
+      return !v
+    })
   }
 
   // arrastre y pellizco
@@ -240,12 +291,33 @@ export function PanZoom({
         </svg>
       )}
       <div className="fw-zoom" onPointerDown={(e) => e.stopPropagation()}>
-        <button className={`fw-zbtn${follow ? ' is-on' : ''}`} onClick={() => setFollow((v) => !v)} title={follow ? 'Seguir el paso: activado' : 'Seguir el paso: desactivado'} aria-pressed={follow}>
+        <button
+          className={`fw-zbtn${follow ? ' is-on' : ''}`}
+          onClick={() => setFollow((v) => !v)}
+          title={follow ? 'Seguir el paso: activado. La vista se mueve hacia las piezas activas.' : 'Seguir el paso: desactivado. La vista queda donde la dejes.'}
+          aria-label="Seguir el paso"
+          aria-pressed={follow}
+        >
           <Crosshair size={14} />
         </button>
+        <button
+          className={`fw-zbtn${keepZoom ? ' is-on' : ''}${keepZoom && userScale ? ' is-locked' : ''}`}
+          onClick={toggleKeep}
+          title={
+            keepZoom
+              ? 'Mantener zoom al avanzar: activado. Tu nivel de zoom se conserva entre pasos y la vista se mueve hacia lo activo.'
+              : 'Mantener zoom al avanzar: desactivado. Cada paso vuelve al encuadre automático.'
+          }
+          aria-label="Mantener zoom al avanzar"
+          aria-pressed={keepZoom}
+        >
+          {keepZoom ? <Lock size={14} /> : <LockOpen size={14} />}
+        </button>
+        <span className="fw-zsep" aria-hidden />
         <button className="fw-zbtn" onClick={() => zoomBy(1 / 1.25)} title="Alejar" aria-label="Alejar">
           <Minus size={14} />
         </button>
+        {userScale && <span className="fw-zpct" title="Nivel de zoom">{Math.round(userScale * 100)}%</span>}
         <button className="fw-zbtn" onClick={() => zoomBy(1.25)} title="Acercar (o Ctrl + rueda)" aria-label="Acercar">
           <Plus size={14} />
         </button>
@@ -254,6 +326,7 @@ export function PanZoom({
           onClick={() => {
             // "ver todo" encuadra el diagrama completo en ambos ejes (también las secuencias largas)
             const s = Math.min(size.w / width, size.h / height, MAX_SCALE)
+            setUserScale(null)
             setManual(true)
             cancelAnimationFrame(anim.current)
             animateTo({ cx: width / 2, cy: height / 2, s })
